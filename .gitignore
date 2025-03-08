@@ -1,0 +1,32 @@
+ # Environment files
+.env
+.env.*
+!.env.example
+
+# Backup files
+backups/
+*.sql
+*.sql.gz
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Dependencies
+node_modules/
+vendor/
+
+# IDE/Editor folders
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# System files
+Thumbs.db
+.directory
+*~
