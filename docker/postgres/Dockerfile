@@ -1,22 +1,48 @@
 FROM postgres:15
 
+# Copy migration SQL directly
+COPY migrations/000_main_migration.sql /docker-entrypoint-initdb.d/schema.sql
+
+# Use environment variables from docker-compose to configure the database
+
+# Create a simple script to setup roles
+COPY <<EOF /docker-entrypoint-initdb.d/2-setup.sh
+#!/bin/bash
+set -e
+echo "Setting up roles..."
+psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+  -- Create roles
+  CREATE ROLE IF NOT EXISTS anon NOLOGIN;
+  DROP ROLE IF EXISTS authenticator;
+  CREATE ROLE authenticator WITH LOGIN PASSWORD '$POSTGRES_PASSWORD' NOINHERIT;
+  GRANT anon TO authenticator;
+  
+  -- Grant permissions
+  GRANT USAGE ON SCHEMA public TO anon;
+  GRANT USAGE ON SCHEMA api TO anon;
+"
+echo "Setup complete"
+EOF
+
+# Make script executable
+RUN chmod +x /docker-entrypoint-initdb.d/2-setup.sh
+
 # Copy initialization scripts
-COPY migrations/000_main_migration.sql /docker-entrypoint-initdb.d/1-schema.sql
-COPY sql/init/init-db.sh /docker-entrypoint-initdb.d/2-init-db.sh
-COPY sql/init/update-pg-hba.sh /docker-entrypoint-initdb.d/3-update-pg-hba.sh
+COPY sql/init/init-db.sh /docker-entrypoint-initdb.d/3-init-db.sh
+COPY sql/init/update-pg-hba.sh /docker-entrypoint-initdb.d/4-update-pg-hba.sh
 COPY sql /docker-entrypoint-initdb.d/sql
 
 # Set permissions
-RUN chmod +x /docker-entrypoint-initdb.d/2-init-db.sh
-RUN chmod +x /docker-entrypoint-initdb.d/3-update-pg-hba.sh
+RUN chmod +x /docker-entrypoint-initdb.d/3-init-db.sh
+RUN chmod +x /docker-entrypoint-initdb.d/4-update-pg-hba.sh
 
 # Add verification script
-COPY <<EOF /docker-entrypoint-initdb.d/4-verify-setup.sh
+COPY <<EOF /docker-entrypoint-initdb.d/5-verify-setup.sh
 #!/bin/bash
 set -e
 
 echo "Verifying database setup..."
-psql -U "\$POSTGRES_USER" -d "\$POSTGRES_DB" <<EOSQL
+psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<EOSQL
   DO \$\$
   BEGIN
     IF NOT EXISTS (
@@ -47,16 +73,16 @@ EOSQL
 echo "All database objects verified successfully!"
 EOF
 
-RUN chmod +x /docker-entrypoint-initdb.d/4-verify-setup.sh 
+RUN chmod +x /docker-entrypoint-initdb.d/5-verify-setup.sh 
 
 # Add emergency fallback script as a final step
-COPY <<EOF /docker-entrypoint-initdb.d/5-emergency-fallback.sh
+COPY <<EOF /docker-entrypoint-initdb.d/6-emergency-fallback.sh
 #!/bin/bash
 set -e
 
 echo "Checking if emergency fallback is needed..."
 # Check if core functions exist
-psql -U "\$POSTGRES_USER" -d "\$POSTGRES_DB" -t -c "
+psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -c "
   SELECT EXISTS (
     SELECT 1 FROM pg_proc 
     WHERE proname = 'create_short_link' 
@@ -68,12 +94,12 @@ if ! grep -q 't' /tmp/function_exists; then
   echo "EMERGENCY FALLBACK: Core functions missing! Creating minimal API..."
   
   # Create API schema if not exists
-  psql -U "\$POSTGRES_USER" -d "\$POSTGRES_DB" -c "
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
     CREATE SCHEMA IF NOT EXISTS api;
   "
   
   # Create anon role if missing
-  psql -U "\$POSTGRES_USER" -d "\$POSTGRES_DB" -c "
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
     DO \$\$
     BEGIN
       IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'anon') THEN
@@ -84,12 +110,12 @@ if ! grep -q 't' /tmp/function_exists; then
   "
   
   # Create authenticator role if missing
-  psql -U "\$POSTGRES_USER" -d "\$POSTGRES_DB" -c "
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
     DO \$\$
     BEGIN
       IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'authenticator') THEN
         DROP ROLE IF EXISTS authenticator;
-        CREATE ROLE authenticator WITH LOGIN PASSWORD '\$POSTGRES_PASSWORD' NOINHERIT;
+        CREATE ROLE authenticator WITH LOGIN PASSWORD '$POSTGRES_PASSWORD' NOINHERIT;
         GRANT anon TO authenticator;
       END IF;
     END
@@ -97,13 +123,13 @@ if ! grep -q 't' /tmp/function_exists; then
   "
   
   # Grant schema permissions
-  psql -U "\$POSTGRES_USER" -d "\$POSTGRES_DB" -c "
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
     GRANT USAGE ON SCHEMA api TO anon;
     GRANT USAGE ON SCHEMA api TO authenticator;
   "
   
   # Create minimal tables if needed
-  psql -U "\$POSTGRES_USER" -d "\$POSTGRES_DB" -c "
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
     CREATE TABLE IF NOT EXISTS api.urls (
       id SERIAL PRIMARY KEY,
       original_url TEXT NOT NULL,
@@ -121,7 +147,7 @@ if ! grep -q 't' /tmp/function_exists; then
   "
   
   # Create minimal functions
-  psql -U "\$POSTGRES_USER" -d "\$POSTGRES_DB" -c "
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
     -- Function to create a short link (simplified version)
     CREATE OR REPLACE FUNCTION api.create_short_link(p_original_url TEXT, p_custom_alias TEXT DEFAULT NULL)
     RETURNS JSON AS \$\$
@@ -195,4 +221,4 @@ else
 fi
 EOF
 
-RUN chmod +x /docker-entrypoint-initdb.d/5-emergency-fallback.sh 
+RUN chmod +x /docker-entrypoint-initdb.d/6-emergency-fallback.sh 

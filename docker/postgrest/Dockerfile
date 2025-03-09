@@ -1,5 +1,11 @@
 FROM postgrest/postgrest:latest
 
+# Coolify needs a very simple Dockerfile without complex scripts
+# This approach uses the default entrypoint from the base image
+
+# Add labels for Coolify compatibility
+LABEL coolify.managed=true
+
 # No additional packages to avoid build issues in Coolify
 
 # Create a startup script that performs database checks before starting PostgREST
