@@ -69,14 +69,11 @@ With these security settings in place, your URL shortener is ready to use in pro
 
 The URL shortener uses a simple API key authentication system. Here's how it works:
 
-### The Correct Authentication Flow
+### The Authentication Flow
 
 1. **Set a master password** as an environment variable (done once during setup)
 2. **Get the API key** using this master password (done once at application startup)
-3. **Use the API key in all your API calls** (passed in the request body)
-
-> 🔒 **Security Best Practice**: While passing API keys in HTTP headers is standard practice in many APIs, 
-> our implementation requires passing the API key in the request body due to technical constraints.
+3. **Use the API key in all your API calls**
 
 ### Getting the API Key
 
@@ -84,7 +81,7 @@ Call this endpoint once to get your API key:
 
 ```bash
 # Get API key using master password
-curl -X POST "https://your-domain/rpc/get_api_key" \
+curl -X POST "https://your-domain/api/rpc/get_api_key" \
   -H "Content-Type: application/json" \
   -d '{"p_password": "your-master-password"}'
 ```
@@ -99,11 +96,23 @@ Response:
 
 ### Using the API Key
 
-Once you have the API key, store it securely and use it in your requests:
+For production use, we recommend the dedicated parameter-based endpoint for reliable authentication:
 
 ```bash
-# The correct way to use the API key in this implementation
-curl -X POST "https://your-domain/rpc/create_short_link" \
+# Production-ready approach for API key authentication
+curl -X POST "https://your-domain/api/rpc/create_short_link_with_key_param" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "p_original_url": "https://example.com/test",
+    "p_api_key": "your-api-key"
+  }'
+```
+
+For backward compatibility, you can also include the API key in the request body of the standard endpoint:
+
+```bash
+# Alternative approach (backward compatibility)
+curl -X POST "https://your-domain/api/rpc/create_short_link" \
   -H "Content-Type: application/json" \
   -d '{
     "p_original_url": "https://example.com/test",
@@ -118,7 +127,7 @@ curl -X POST "https://your-domain/rpc/create_short_link" \
 This is the recommended method for all production use:
 
 ```bash
-curl -X POST "https://your-domain/rpc/create_short_link" \
+curl -X POST "https://your-domain/api/rpc/create_short_link_with_key_param" \
   -H "Content-Type: application/json" \
   -d '{
     "p_original_url": "https://example.com/long-url",
@@ -147,7 +156,7 @@ Returns:
 > ⚠️ **Not recommended for production use**. This method exists mainly for testing and development.
 
 ```bash
-curl -X POST "https://your-domain/rpc/quick_link" \
+curl -X POST "https://your-domain/api/rpc/quick_link" \
   -H "Content-Type: application/json" \
   -d '{
     "p_url": "https://example.com/your-long-url",
@@ -189,9 +198,21 @@ The Swagger UI provides:
 These are the main endpoints you'll use:
 
 1. `/rpc/get_api_key` - Get an API key using master password
-2. `/rpc/quick_link` - Create a short link with master password
-3. `/rpc/create_short_link` - Create a short link with API key
-4. `/rpc/change_master_password` - Change the master password
+2. `/rpc/create_short_link_with_key_param` - Create a short link with API key (recommended)
+3. `/rpc/create_short_link` - Create a short link with API key (alternative)
+4. `/rpc/quick_link` - Create a short link with master password (for testing only)
+5. `/rpc/change_master_password` - Change the master password
+
+## Security Best Practices
+
+For secure production deployment, follow these guidelines:
+
+1. **Strong Passwords**: Use complex, unique passwords for all credentials
+2. **HTTPS Required**: Always use HTTPS in production to prevent credential interception
+3. **API Key Management**: Rotate API keys periodically for enhanced security
+4. **Least Privilege**: Create API keys with only the permissions needed
+5. **Logging**: Monitor analytics_events table for security-related events
+6. **Rate Limiting**: Configure appropriate rate limits to prevent abuse
 
 ## Environment Variables
 
