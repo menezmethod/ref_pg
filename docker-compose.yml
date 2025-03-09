@@ -12,6 +12,55 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
+      # Force PostgreSQL to run initialization scripts even with existing data
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+    # Add a custom command to create roles after PostgreSQL starts
+    command: >
+      bash -c "
+        # Start PostgreSQL in background
+        docker-entrypoint.sh postgres &
+        
+        # Wait for PostgreSQL to start
+        until pg_isready -U postgres; do
+          echo 'Waiting for PostgreSQL to start...'
+          sleep 2
+        done
+        
+        # Create the required roles
+        echo 'Creating roles and permissions...'
+        psql -U postgres -d url_shortener -c \"
+          DO \\\$\\\$
+          BEGIN
+              -- Create anonymous role if it doesn't exist
+              IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'anon') THEN
+                  CREATE ROLE anon NOLOGIN;
+              END IF;
+              
+              -- Create authenticator role (or update password if it exists)
+              IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'authenticator') THEN
+                  CREATE ROLE authenticator WITH LOGIN PASSWORD '$${POSTGRES_PASSWORD:-postgres}' NOINHERIT;
+              ELSE
+                  ALTER ROLE authenticator WITH PASSWORD '$${POSTGRES_PASSWORD:-postgres}';
+              END IF;
+              
+              -- Ensure anon role is granted to authenticator
+              GRANT anon TO authenticator;
+              
+              -- Create API schema if it doesn't exist
+              CREATE SCHEMA IF NOT EXISTS api;
+              
+              -- Grant permissions
+              GRANT USAGE ON SCHEMA api TO anon;
+              GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA api TO anon;
+              GRANT USAGE ON ALL SEQUENCES IN SCHEMA api TO anon;
+              GRANT SELECT ON ALL TABLES IN SCHEMA api TO anon;
+          END
+          \\\$\\\$;
+        \"
+        
+        # Keep container running
+        wait
+      "
     networks:
       - shortener-net
 
@@ -32,7 +81,7 @@ services:
     command: >
       sh -c "
         echo 'Waiting for database to be ready...' &&
-        sleep 15 &&
+        sleep 20 &&
         postgrest
       "
     networks:
