@@ -34,7 +34,7 @@ services:
     container_name: url_shortener_redis
     restart: always
     ports:
-      - "6379:6379"
+      - "6380:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
@@ -75,7 +75,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     ports:
-      - "3001:3000"
+      - "3333:3000"
     networks:
       - shortener-net
     logging:
@@ -126,7 +126,7 @@ services:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
     ports:
-      - "5050:80"
+      - "5051:80"
     depends_on:
       - db
     volumes:
@@ -143,9 +143,9 @@ services:
     image: swaggerapi/swagger-ui
     container_name: url_shortener_swagger
     ports:
-      - "8080:8080"
+      - "8081:8080"
     environment:
-      API_URL: http://localhost:3001/
+      API_URL: http://localhost:3333/
     depends_on:
       - postgrest
     networks:

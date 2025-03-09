@@ -4,7 +4,7 @@ This guide provides instructions on how to access and use pgAdmin to manage the 
 
 ## Accessing pgAdmin
 
-1. Open your browser and navigate to [https://pgadmin.menezmethod.com](https://pgadmin.menezmethod.com) or, if running locally, [http://localhost:5050](http://localhost:5050)
+1. Open your browser and navigate to [https://pgadmin.menezmethod.com](https://pgadmin.menezmethod.com) or, if running locally, [http://localhost:5051](http://localhost:5051)
 
 2. Login with the following credentials:
    - **Email**: `luisgimenezdev@gmail.com` (or the value of PGADMIN_EMAIL environment variable)
@@ -15,12 +15,13 @@ This guide provides instructions on how to access and use pgAdmin to manage the 
 | Service | Internal Port | External Port | URL |
 |---------|--------------|--------------|-----|
 | PostgreSQL | 5432 | 5433 | N/A (Database connection) |
-| pgAdmin | 80 | 5050 | http://localhost:5050 |
-| PostgREST API | 3000 | 3001 | http://localhost:3001 |
+| pgAdmin | 80 | 5051 | http://localhost:5051 |
+| PostgREST API | 3000 | 3333 | http://localhost:3333 |
 | URL Shortener | 80 | 8001 | http://localhost:8001/r/{code} |
-| Swagger UI | 8080 | 8080 | http://localhost:8080 |
+| Swagger UI | 8080 | 8081 | http://localhost:8081 |
+| Redis | 6379 | 6380 | N/A (Database connection) |
 
-**Note**: The URL Shortener service uses port 8001 (changed from 8000) to avoid conflicts with other services in Coolify environments.
+**Note**: All service ports have been changed from their defaults to avoid conflicts with other services in Coolify environments.
 
 ## Connecting to the URL Shortener Database
 
