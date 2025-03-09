@@ -5,12 +5,12 @@ echo "Starting PostgREST entrypoint script (with built-in health check)..."
 
 # Create a simple health check server using a background process
 start_health_server() {
-  # Use a simple while loop to create a basic HTTP server on port 8080
+  # Use a simple while loop to create a basic HTTP server on port 8888
   # This will respond to health checks while PostgREST is starting
-  echo "Starting built-in health check server on port 8080..."
+  echo "Starting built-in health check server on port 8888..."
   (
     while true; do
-      { echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"; } | nc -l -p 8080 -q 1 || true
+      { echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"; } | nc -l -p 8888 -q 1 || true
       sleep 0.1
     done
   ) &

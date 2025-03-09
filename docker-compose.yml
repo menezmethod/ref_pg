@@ -79,7 +79,7 @@ services:
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     ports:
       - "3333:3000"
-      - "8080:8080"
+      - "8888:8888"
     networks:
       - shortener-net
     logging:
@@ -88,7 +88,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/ -m 5 || exit 0"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8888/ -m 5 || exit 0"]
       interval: 30s
       timeout: 10s
       retries: 10
