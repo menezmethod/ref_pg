@@ -120,7 +120,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-debug}
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-*}
     ports:
-      - "8080:80"
+      - "8001:80"
     networks:
       - shortener-net
 
