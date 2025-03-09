@@ -1,12 +1,18 @@
 # Patch Notes - URL Shortener Coolify Deployment Fixes
 
-## Version 1.1.3 - 2025-03-09
+## Version 1.1.4 - 2025-03-09
 
-This patch addresses comprehensive port conflict issues when deploying in Coolify environments by changing all service ports to non-standard values.
+This patch addresses permission issues with the OpenResty container in Coolify environments.
 
 ### Bug Fixes for Coolify
 
-1. **Port Conflict Resolution**
+1. **OpenResty Permission Fixes**
+   - Modified Dockerfile to remove the USER directive that was causing permission issues
+   - Updated the permissions of nginx configuration directories to be writable
+   - Added a fallback mechanism in the entrypoint script to use a temporary configuration file
+   - Ensured the application can run without root privileges in restricted environments
+
+2. **Port Conflict Resolution**
    - Changed all exposed ports to non-default values to avoid conflicts:
      - PostgreSQL: 5433 (was 5432)
      - Redis: 6380 (was 6379)
@@ -17,22 +23,22 @@ This patch addresses comprehensive port conflict issues when deploying in Coolif
    - Updated all documentation to reflect the new port mappings
    - Modified API URLs in Swagger UI to point to new ports
 
-2. **PostgREST Configuration Fix**
+3. **PostgREST Configuration Fix**
    - Replaced mounted config file with direct environment variables
    - Added custom entrypoint script to ensure database connection
    - Simplified container dependencies
 
-3. **PostgreSQL Initialization Enhancements**
+4. **PostgreSQL Initialization Enhancements**
    - Improved initialization script with better error handling
    - Added automatic retry mechanisms
    - Ensured database creation is reliable in Coolify containers
 
-4. **Container Dependencies Simplified**
+5. **Container Dependencies Simplified**
    - Removed health-check based dependencies which can be problematic in Coolify
    - Simplified service ordering to avoid circular dependencies
    - Improved individual container health checks
 
-5. **Coolify-Specific Optimizations**
+6. **Coolify-Specific Optimizations**
    - Made the solution work without relying on Coolify's support for volume mounts
    - Ensured containers start in the right order without complex dependencies
    - Provided fallback mechanisms for all services
