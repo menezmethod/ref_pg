@@ -1,3 +1,5 @@
+version: '3'
+
 services:
   db:
     image: postgres:15
@@ -19,113 +21,12 @@ services:
       - db
     volumes:
       - ./migrations:/migrations
-    command: |
+    command: >
       bash -c "
         echo 'Waiting for PostgreSQL...' &&
         sleep 10 &&
-        echo 'Checking migration file...' &&
-        if [ -f /migrations/000_main_migration.sql ]; then
-          echo 'Migration file found, running script...' &&
-          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /migrations/000_main_migration.sql
-        else
-          echo 'Migration file not found or not accessible, creating basic schema...' &&
-          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c 'CREATE SCHEMA IF NOT EXISTS api;' &&
-          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c '
-            CREATE TABLE IF NOT EXISTS api.urls (
-              id SERIAL PRIMARY KEY,
-              original_url TEXT NOT NULL,
-              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-          ' &&
-          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c '
-            CREATE TABLE IF NOT EXISTS api.short_links (
-              id SERIAL PRIMARY KEY,
-              url_id INTEGER REFERENCES api.urls(id),
-              code TEXT NOT NULL UNIQUE,
-              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-          ' &&
-          echo 'Creating URL shortener functions...' &&
-          cat > /tmp/create_short_link.sql << 'EOSQL'
-          CREATE OR REPLACE FUNCTION api.create_short_link(p_original_url TEXT, p_custom_alias TEXT DEFAULT NULL)
-          RETURNS JSON AS $$
-          DECLARE
-            v_url_id INTEGER;
-            v_code TEXT;
-          BEGIN
-            INSERT INTO api.urls (original_url) VALUES (p_original_url) RETURNING id INTO v_url_id;
-            v_code := COALESCE(p_custom_alias, 'url' || v_url_id::TEXT);
-            INSERT INTO api.short_links (url_id, code) VALUES (v_url_id, v_code);
-            RETURN json_build_object(
-              'success', TRUE,
-              'code', v_code,
-              'short_url', 'https://ref.menezmethod.com/r/' || v_code,
-              'original_url', p_original_url
-            );
-          END;
-          $$ LANGUAGE plpgsql SECURITY DEFINER;
-          EOSQL
-
-          cat > /tmp/get_original_url.sql << 'EOSQL'
-          CREATE OR REPLACE FUNCTION api.get_original_url(p_code TEXT)
-          RETURNS JSON AS $$
-          DECLARE
-            v_original_url TEXT;
-          BEGIN
-            SELECT u.original_url INTO v_original_url
-            FROM api.short_links s
-            JOIN api.urls u ON s.url_id = u.id
-            WHERE s.code = p_code;
-            
-            IF v_original_url IS NULL THEN
-              RETURN json_build_object(
-                'success', FALSE,
-                'error', 'Short URL not found'
-              );
-            END IF;
-            
-            RETURN json_build_object(
-              'success', TRUE,
-              'original_url', v_original_url
-            );
-          END;
-          $$ LANGUAGE plpgsql SECURITY DEFINER;
-          EOSQL
-
-          cat > /tmp/quick_link.sql << 'EOSQL'
-          CREATE OR REPLACE FUNCTION api.quick_link(url TEXT, alias TEXT, api_key TEXT DEFAULT NULL)
-          RETURNS JSON AS $$
-          BEGIN
-            RETURN api.create_short_link(url, alias);
-          END;
-          $$ LANGUAGE plpgsql SECURITY DEFINER;
-          EOSQL
-
-          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /tmp/create_short_link.sql &&
-          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /tmp/get_original_url.sql &&
-          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /tmp/quick_link.sql
-        fi &&
-        echo 'Ensuring roles are set correctly...' &&
-        cat > /tmp/roles.sql << 'EOSQL'
-        DO $$
-        BEGIN
-          IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'anon') THEN
-            CREATE ROLE anon NOLOGIN;
-          END IF;
-          IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'authenticator') THEN
-            DROP ROLE IF EXISTS authenticator;
-            CREATE ROLE authenticator WITH LOGIN PASSWORD '$$POSTGRES_PASSWORD' NOINHERIT;
-            GRANT anon TO authenticator;
-          END IF;
-          GRANT USAGE ON SCHEMA api TO anon;
-          GRANT USAGE ON SCHEMA api TO authenticator;
-          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA api TO anon;
-        END;
-        $$;
-        EOSQL
-
-        sed -i \"s/\\$\\$POSTGRES_PASSWORD/$$POSTGRES_PASSWORD/g\" /tmp/roles.sql &&
-        PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /tmp/roles.sql &&
+        echo 'Running migration script...' &&
+        PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -f /migrations/000_main_migration.sql &&
         echo 'Database initialization completed.'
       "
     environment:
@@ -150,14 +51,14 @@ services:
       PGRST_SERVER_PORT: 3000
     ports:
       - "3333:3000"
-    networks:
-      - shortener-net
-    command: |
+    command: >
       sh -c "
         echo 'Waiting for database to be ready...' &&
         sleep 15 &&
         postgrest
       "
+    networks:
+      - shortener-net
 
   openresty:
     image: openresty/openresty:alpine
@@ -174,11 +75,14 @@ services:
       - "8001:80"
     volumes:
       - ./nginx.conf.coolify:/tmp/nginx.conf:ro
-    command: |
+    command: >
       sh -c "
-        mkdir -p /etc/nginx/conf.d
-        cp /tmp/nginx.conf /etc/nginx/conf.d/default.conf
-        /usr/local/openresty/bin/openresty -g \"daemon off;\"
+        if [ -d /etc/nginx/conf.d/default.conf ]; then
+          rm -rf /etc/nginx/conf.d/default.conf;
+        fi &&
+        mkdir -p /etc/nginx/conf.d &&
+        cp /tmp/nginx.conf /etc/nginx/conf.d/default.conf &&
+        /usr/local/openresty/bin/openresty -g 'daemon off;'
       "
     networks:
       - shortener-net
