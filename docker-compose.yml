@@ -28,6 +28,31 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # DB Initializer - ensures migrations are applied every time
+  db-init:
+    image: postgres:15
+    container_name: url_shortener_db_init
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations
+      - ./init-production-db.sh:/init-db.sh
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
+      MASTER_PASSWORD: ${MASTER_PASSWORD:-master123}
+    command: ["bash", "/init-db.sh"]
+    networks:
+      - shortener-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   redis:
     image: redis:alpine
     container_name: url_shortener_redis
@@ -57,7 +82,7 @@ services:
     container_name: url_shortener_api
     restart: always
     depends_on:
-      - db
+      - db-init
     environment:
       PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-url_shortener}
       PGRST_DB_SCHEMA: api
