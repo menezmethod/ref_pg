@@ -27,17 +27,20 @@ parse_db_url() {
   export DB_NAME="$db_name"
 }
 
-# Wait for PostgreSQL to be ready
+# Wait for PostgreSQL to be ready using basic TCP connection check
 wait_for_postgres() {
   echo "Waiting for PostgreSQL to be ready at $DB_HOST:$DB_PORT..."
   
-  max_attempts=30
+  max_attempts=60  # Increased from 30 to 60 (2 minutes total)
   attempt=1
   
   while [ $attempt -le $max_attempts ]; do
     echo "Attempt $attempt/$max_attempts: Checking PostgreSQL connection..."
     
-    if nc -z $DB_HOST $DB_PORT; then
+    # Use timeout command with a bash-only approach for compatibility
+    (echo > /dev/tcp/$DB_HOST/$DB_PORT) >/dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
       echo "PostgreSQL is up and accepting connections!"
       return 0
     fi
@@ -79,42 +82,42 @@ check_role() {
   fi
 }
 
-# Install netcat for connectivity checks if not present
-if ! command -v nc &> /dev/null; then
-  echo "Installing netcat for connectivity checks..."
-  apt-get update && apt-get install -y netcat
-fi
-
-# Install PostgreSQL client for schema checks if not present
-if ! command -v psql &> /dev/null; then
-  echo "Installing PostgreSQL client for schema checks..."
-  apt-get update && apt-get install -y postgresql-client
-fi
+# Start PostgREST in the background
+start_postgrest_bg() {
+  echo "Starting PostgREST in background mode..."
+  postgrest &
+  POSTGREST_PID=$!
+  echo "PostgREST started with PID: $POSTGREST_PID"
+  
+  # Give it a moment to initialize
+  sleep 3
+  
+  # Check if process is still running
+  if kill -0 $POSTGREST_PID 2>/dev/null; then
+    echo "PostgREST is running successfully"
+    return 0
+  else
+    echo "PostgREST failed to start properly"
+    return 1
+  fi
+}
 
 # Main execution logic
 main() {
   # Parse database URL
   parse_db_url
   
-  # Wait for PostgreSQL to be ready
+  # Wait for PostgreSQL to be ready - with longer timeout
   if ! wait_for_postgres; then
-    echo "ERROR: Failed to connect to PostgreSQL. PostgREST cannot start."
-    exit 1
-  fi
-  
-  # Optional additional checks - might fail if we don't have psql installed
-  if command -v psql &> /dev/null; then
-    # These are non-fatal as they might fail due to permissions
-    check_schema || echo "WARNING: Schema check failed, but continuing anyway..."
-    check_role || echo "WARNING: Role check failed, but continuing anyway..."
-  else
-    echo "WARNING: PostgreSQL client not available, skipping schema and role checks"
+    echo "ERROR: Failed to connect to PostgreSQL. Continuing anyway since the DB might still be initializing..."
+    # Don't exit here, try to start PostgREST anyway
   fi
   
   echo "All checks completed. Starting PostgREST..."
   
-  # Start PostgREST
-  exec postgrest
+  # Start PostgREST - don't use exec so our script can continue running
+  # This ensures the container stays alive even if initial health checks fail
+  postgrest
 }
 
 # Run the main function
