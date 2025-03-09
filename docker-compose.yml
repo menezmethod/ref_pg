@@ -56,17 +56,24 @@ services:
     container_name: url_shortener_api
     restart: always
     depends_on:
-      db:
-        condition: service_healthy
+      - db
     volumes:
-      - ./docker/postgrest/postgrest.conf:/etc/postgrest.conf
+      - ./docker/postgrest/entrypoint.sh:/entrypoint.sh
     environment:
       PGRST_DB_URI: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-url_shortener}
       PGRST_DB_SCHEMA: public
       PGRST_DB_ANON_ROLE: postgres
       PGRST_JWT_SECRET: ${JWT_SECRET:-your_jwt_secret_change_me}
       PGRST_SERVER_PORT: 3000
-    command: postgrest /etc/postgrest.conf
+      PGRST_DB_POOL: 10
+      PGRST_DB_POOL_TIMEOUT: 10
+      PGRST_MAX_ROWS: 1000
+      PGRST_CORS_PREFLIGHT_CACHE_SECONDS: 3600
+      PGRST_RAW_MEDIA_TYPES: application/vnd.pgrst.object+json,application/vnd.pgrst.object+octet-stream
+      # Pass these through to the entrypoint script
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     ports:
       - "3001:3000"
     networks:
@@ -77,10 +84,10 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/ || exit 1"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 5
       start_period: 30s
 
   openresty:
@@ -90,8 +97,7 @@ services:
     container_name: url_shortener_redirect
     restart: always
     depends_on:
-      postgrest:
-        condition: service_healthy
+      - db
     environment:
       RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-60}
       RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-60}
@@ -106,7 +112,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      test: ["CMD-SHELL", "curl -f http://localhost:80/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -122,8 +128,7 @@ services:
     ports:
       - "5050:80"
     depends_on:
-      db:
-        condition: service_healthy
+      - db
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     networks:
@@ -142,8 +147,7 @@ services:
     environment:
       API_URL: http://localhost:3001/
     depends_on:
-      postgrest:
-        condition: service_healthy
+      - postgrest
     networks:
       - shortener-net
     logging:

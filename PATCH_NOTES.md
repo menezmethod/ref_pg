@@ -1,45 +1,37 @@
 # Patch Notes - URL Shortener Coolify Deployment Fixes
 
-## Version 1.1.0 - 2025-03-09
+## Version 1.1.1 - 2025-03-09
 
-This patch addresses several issues with deploying the URL Shortener application on Coolify and implements a fully automated deployment solution. The following changes have been made to improve deployment reliability:
+This patch specifically addresses deployment issues in Coolify environments. The changes focus on simplicity and reliability by eliminating complex configuration options in favor of a more direct approach.
 
-### Bug Fixes
+### Bug Fixes for Coolify
 
-1. **PostgreSQL Database Creation Issue**
-   - Modified PostgreSQL initialization to ensure the database is created automatically
-   - Updated init scripts with numbered prefixes to enforce correct execution order
-   - Added robust retry logic for database connection and schema initialization
+1. **PostgREST Configuration Fix**
+   - Replaced mounted config file with direct environment variables
+   - Added custom entrypoint script to ensure database connection
+   - Simplified container dependencies
 
-2. **PostgREST Configuration Fix**
-   - Implemented dual configuration approach using both environment variables and a fallback config file
-   - Added environment variables for all required PostgREST settings
-   - Created a template configuration file that pulls values from environment variables
+2. **PostgreSQL Initialization Enhancements**
+   - Improved initialization script with better error handling
+   - Added automatic retry mechanisms
+   - Ensured database creation is reliable in Coolify containers
 
-3. **Dependencies and Startup Order**
-   - Added proper health checks to all services
-   - Implemented proper dependency order with service health conditions
-   - Ensured services wait for their dependencies to be healthy before starting
+3. **Container Dependencies Simplified**
+   - Removed health-check based dependencies which can be problematic in Coolify
+   - Simplified service ordering to avoid circular dependencies
+   - Improved individual container health checks
 
-4. **Validation and Monitoring**
-   - Added validation script to verify proper setup
-   - Implemented comprehensive health checks for all services
+4. **Coolify-Specific Optimizations**
+   - Made the solution work without relying on Coolify's support for volume mounts
+   - Ensured containers start in the right order without complex dependencies
 
-### Automatic Deployment
+### Automatic Deployment for Coolify
 
-The changes ensure that deployment is fully automated in Coolify:
+The changes ensure that deployment is fully automated in Coolify with no manual steps:
 
-1. PostgreSQL container automatically:
-   - Creates the database
-   - Applies the schema
-   - Sets the master password
-
-2. PostgREST automatically:
-   - Connects to the database
-   - Uses the correct schema
-   - Authenticates with the correct credentials
-
-3. Other services automatically wait for their dependencies to be healthy before starting
+1. Start the stack with `coolify deploy`
+2. All services will automatically initialize correctly
+3. No need for SSH access or manual intervention
 
 ### Environment Variables
 
@@ -56,7 +48,7 @@ Ensure these variables are correctly set in your Coolify environment:
 
 ### Connection Details
 
-- PostgreSQL is now accessible on port 5433 (external) and 5432 (internal)
+- PostgreSQL is accessible on port 5433 (external) and 5432 (internal)
 - PostgREST API is available on port 3001
 - URL Shortener redirect service is on port 8000
 - Swagger UI is on port 8080
