@@ -1,7 +1,30 @@
 FROM postgres:15
 
-# Copy migration SQL directly
-COPY migrations/000_main_migration.sql /docker-entrypoint-initdb.d/schema.sql
+# Check migrations directory and file
+RUN echo "Starting PostgreSQL container with debugging" && mkdir -p /docker-entrypoint-initdb.d
+
+# Alternative approach: Create a script to apply migrations at runtime
+COPY <<EOF /docker-entrypoint-initdb.d/1-copy-schema.sh
+#!/bin/bash
+set -e
+echo "Checking for migration file..."
+if [ -f /docker-entrypoint-initdb.d/sql/000_main_migration.sql ]; then
+  echo "Migration file found as copied SQL file"
+  cp /docker-entrypoint-initdb.d/sql/000_main_migration.sql /docker-entrypoint-initdb.d/schema.sql
+  echo "Copied migration SQL to schema.sql"
+elif [ -f /migrations/000_main_migration.sql ]; then
+  echo "Migration file found in mounted volume"
+  cp /migrations/000_main_migration.sql /docker-entrypoint-initdb.d/schema.sql
+  echo "Copied migration SQL to schema.sql"
+else
+  echo "Warning: Migration SQL file not found, will use fallback"
+fi
+EOF
+
+RUN chmod +x /docker-entrypoint-initdb.d/1-copy-schema.sh
+
+# Copy migrations directory to a location in the container for direct access
+COPY migrations /docker-entrypoint-initdb.d/sql/
 
 # Use environment variables from docker-compose to configure the database
 

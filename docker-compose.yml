@@ -43,8 +43,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
       MASTER_PASSWORD: ${MASTER_PASSWORD:-master123}
-    # Simple command to run the initialization script
-    command: ["sh", "-c", "sleep 5 && PGPASSWORD=${POSTGRES_PASSWORD} psql -h db -U ${POSTGRES_USER} -d ${POSTGRES_DB} -f /migrations/000_main_migration.sql"]
+    # Modified command with debugging and simplified approach
+    command: ["sh", "-c", "ls -la /migrations && if [ -f /migrations/000_main_migration.sql ]; then echo 'File exists, running SQL script...' && sleep 5 && PGPASSWORD=${POSTGRES_PASSWORD} psql -h db -U ${POSTGRES_USER} -d ${POSTGRES_DB} -f /migrations/000_main_migration.sql; else echo 'ERROR: Migration file is not a regular file or does not exist' && ls -la /migrations; fi"]
     networks:
       - shortener-net
     logging:
