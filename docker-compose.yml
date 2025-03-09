@@ -61,7 +61,9 @@ services:
     depends_on:
       - db
     environment:
-      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-url_shortener}
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db-gwg0scggsk0o8swcgogg04wc:5432/${POSTGRES_DB:-url_shortener}
+      # Fallback to regular name if Coolify name doesn't work
+      COOLIFY_DB_FALLBACK: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-url_shortener}
       PGRST_DB_SCHEMA: api
       PGRST_DB_ANON_ROLE: anon
       PGRST_JWT_SECRET: ${JWT_SECRET:-your_jwt_secret_change_me}

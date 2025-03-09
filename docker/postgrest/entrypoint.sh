@@ -40,9 +40,9 @@ cleanup() {
   exit 0
 }
 
-# Parse DATABASE_URL to extract components
+# Parse DATABASE_URL to extract components and try multiple host formats
 parse_db_url() {
-  # Extract DB connection details from PGRST_DB_URI
+  # First try the main DB_URI
   db_uri="${PGRST_DB_URI}"
   
   # Extract host and port
@@ -54,7 +54,7 @@ parse_db_url() {
     db_name=$(echo "$db_uri" | sed -n 's|.*/\(.*\)|\1|p')
   fi
   
-  echo "Database connection details:"
+  echo "Database connection details (primary):"
   echo "- Host: $db_host"
   echo "- Port: $db_port"
   echo "- Database: $db_name" 
@@ -62,23 +62,60 @@ parse_db_url() {
   export DB_HOST="$db_host"
   export DB_PORT="$db_port"
   export DB_NAME="$db_name"
+  
+  # Also store fallback connection details if provided
+  if [ -n "${COOLIFY_DB_FALLBACK}" ]; then
+    db_uri_fallback="${COOLIFY_DB_FALLBACK}"
+    db_host_fallback=$(echo "$db_uri_fallback" | sed -n 's|.*@\([^:]*\):\([0-9]*\)/.*|\1|p')
+    echo "Fallback database host: $db_host_fallback"
+    export DB_HOST_FALLBACK="$db_host_fallback"
+  fi
 }
 
 # Wait for PostgreSQL to be ready using basic TCP connection check
 wait_for_postgres() {
-  echo "Waiting for PostgreSQL to be ready at $DB_HOST:$DB_PORT..."
+  echo "Waiting for PostgreSQL to be ready..."
+  
+  # First try primary host
+  if wait_for_postgres_host "$DB_HOST" "$DB_PORT"; then
+    return 0
+  fi
+  
+  # If that fails and we have a fallback, try the fallback
+  if [ -n "$DB_HOST_FALLBACK" ]; then
+    echo "Primary database host unreachable, trying fallback host: $DB_HOST_FALLBACK"
+    if wait_for_postgres_host "$DB_HOST_FALLBACK" "$DB_PORT"; then
+      # Update the primary host to use the working fallback
+      export DB_HOST="$DB_HOST_FALLBACK"
+      # Also update PGRST_DB_URI to use the working host
+      export PGRST_DB_URI="$COOLIFY_DB_FALLBACK"
+      return 0
+    fi
+  fi
+  
+  # If we get here, both primary and fallback failed
+  echo "Failed to connect to any PostgreSQL host"
+  return 1
+}
+
+# Helper function to check a specific host/port combination
+wait_for_postgres_host() {
+  host="$1"
+  port="$2"
+  
+  echo "Checking PostgreSQL at $host:$port..."
   
   max_attempts=60  # 2 minutes total
   attempt=1
   
   while [ $attempt -le $max_attempts ]; do
-    echo "Attempt $attempt/$max_attempts: Checking PostgreSQL connection..."
+    echo "Attempt $attempt/$max_attempts: Checking PostgreSQL connection at $host:$port..."
     
-    # Use timeout command with a bash-only approach for compatibility
-    (echo > /dev/tcp/$DB_HOST/$DB_PORT) >/dev/null 2>&1
+    # Try to connect
+    (echo > /dev/tcp/$host/$port) >/dev/null 2>&1
     
     if [ $? -eq 0 ]; then
-      echo "PostgreSQL is up and accepting connections!"
+      echo "PostgreSQL is up and accepting connections at $host:$port!"
       return 0
     fi
     
@@ -86,7 +123,7 @@ wait_for_postgres() {
     sleep 2
   done
   
-  echo "Failed to connect to PostgreSQL after $max_attempts attempts"
+  echo "Failed to connect to PostgreSQL at $host:$port after $max_attempts attempts"
   return 1
 }
 
@@ -142,6 +179,7 @@ main() {
   wait_for_postgres || echo "WARNING: Database connection check failed, but continuing anyway..."
   
   echo "Starting PostgREST in foreground mode..."
+  echo "Using database connection: $PGRST_DB_URI"
   
   # Start PostgREST in the foreground, but keep script running
   postgrest &
