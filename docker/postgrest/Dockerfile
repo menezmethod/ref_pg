@@ -2,9 +2,14 @@ FROM postgrest/postgrest:latest
 
 USER root
 
-# Install netcat for our health check server
+# Install netcat and network diagnostic tools
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends netcat-openbsd && \
+    apt-get install -y --no-install-recommends \
+    netcat-openbsd \
+    iputils-ping \
+    net-tools \
+    dnsutils \
+    postgresql-client && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
