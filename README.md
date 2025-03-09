@@ -121,6 +121,69 @@ curl -X POST "http://localhost:3001/rpc/list_api_keys" \
   -H "X-API-Key: your-admin-key"
 ```
 
+## Authentication Methods
+
+The URL shortener supports multiple authentication methods:
+
+### 1. API Key Authentication
+
+Suitable for programmatic access and integration with other systems:
+
+- **Using X-API-Key header**:
+  ```bash
+  curl -X POST "http://localhost:3001/rpc/create_short_link" \
+    -H "Content-Type: application/json" \
+    -H "X-API-Key: your-api-key" \
+    -d '{"p_original_url": "https://example.com/test"}'
+  ```
+
+- **Including API key in request body**:
+  ```bash
+  curl -X POST "http://localhost:3001/rpc/create_short_link" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "p_original_url": "https://example.com/test",
+      "p_api_key": "your-api-key"
+    }'
+  ```
+
+### 2. Simple Password Authentication (Recommended for Coolify)
+
+For simpler deployments like Coolify, we provide a straightforward password-based authentication:
+
+1. **Set the master password** (using admin API key, do this once):
+   ```bash
+   curl -X POST "http://localhost:3001/rpc/set_master_password" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "p_password": "your-secure-password",
+       "p_admin_api_key": "your-admin-api-key"
+     }'
+   ```
+
+2. **Create short links with just the password**:
+   ```bash
+   curl -X POST "http://localhost:3001/rpc/simple_create_link" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "p_password": "your-secure-password",
+       "p_url": "https://example.com/to-shorten",
+       "p_custom_code": "optional-custom-code"
+     }'
+   ```
+
+3. **Change the password** (if needed):
+   ```bash
+   curl -X POST "http://localhost:3001/rpc/change_master_password" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "p_current_password": "your-current-password",
+       "p_new_password": "your-new-password"
+     }'
+   ```
+
+This simplified approach is perfect for Coolify as it only requires remembering a single password instead of managing complex API keys.
+
 ## Environment Variables
 
 The service can be configured using the following environment variables:
