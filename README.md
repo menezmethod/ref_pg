@@ -67,22 +67,20 @@ With these security settings in place, your URL shortener is ready to use in pro
 
 ## Authentication Flow
 
-The URL shortener supports a simple authentication flow designed for easy integration with external applications:
+The URL shortener uses a simple API key authentication system. Here's how it works:
 
-### 1. Master Password → API Key Flow
+### The Correct Authentication Flow
 
-The main authentication flow is:
+1. **Set a master password** as an environment variable (done once during setup)
+2. **Get the API key** using this master password (done once at application startup)
+3. **Use only the API key** for all operations (creating short links, etc.)
 
-1. **Set master password** in environment variables (done once during setup)
-2. **Get API key** using the master password 
-3. **Use the API key** in your applications to create short links
+> ⚠️ **Important**: The master password should ONLY be used to get the API key. 
+> All actual operations should be performed using the API key, not the password directly.
 
-This approach allows you to:
-- Have a single master password that's easy to remember
-- Generate an API key that applications can use
-- Revoke/change API keys without changing your master password
+### Getting the API Key
 
-### 2. Getting an API Key
+Call this endpoint once to get your API key:
 
 ```bash
 # Get API key using master password
@@ -99,11 +97,12 @@ Response:
 }
 ```
 
-### 3. Using the API Key
+### Using the API Key
 
-Once you have the API key, your applications can use it for authentication:
+Once you have the API key, store it securely and use it for all operations:
 
 ```bash
+# This is the proper way to use the service
 curl -X POST "https://your-domain/rpc/create_short_link" \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key" \
@@ -112,29 +111,9 @@ curl -X POST "https://your-domain/rpc/create_short_link" \
 
 ## API Usage
 
-### Creating Short Links
+### Creating Short Links (With API Key - RECOMMENDED)
 
-#### Method 1: Quick Link (Simplest)
-
-This method accepts a password directly and returns just the short code:
-
-```bash
-curl -X POST "https://your-domain/rpc/quick_link" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "p_url": "https://example.com/your-long-url",
-    "p_password": "your-master-password",
-    "p_code": "optional-custom-code"  // Omit to auto-generate a code
-  }'
-```
-
-Returns: `"generated-or-custom-code"`
-
-> **Note**: The `p_code` parameter is optional. If omitted, a random short code will be automatically generated.
-
-#### Method 2: Create Short Link (with API Key)
-
-This method uses an API key for authentication and returns detailed information:
+This is the recommended method for all production use:
 
 ```bash
 curl -X POST "https://your-domain/rpc/create_short_link" \
@@ -160,6 +139,22 @@ Returns:
   "expires_at": null
 }
 ```
+
+### Direct Password Method (FOR TESTING ONLY)
+
+> ⚠️ **Not recommended for production use**. This method exists mainly for testing and development.
+
+```bash
+curl -X POST "https://your-domain/rpc/quick_link" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "p_url": "https://example.com/your-long-url",
+    "p_password": "your-master-password",
+    "p_code": "optional-custom-code"  // Omit to auto-generate a code
+  }'
+```
+
+Returns: `"generated-or-custom-code"`
 
 ### Accessing Short Links
 
