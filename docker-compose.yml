@@ -20,60 +20,53 @@ services:
     volumes:
       - ./migrations:/migrations
     command: >
-      bash -c '
-        echo "Waiting for PostgreSQL..." &&
+      bash -c "
+        echo 'Waiting for PostgreSQL...' &&
         sleep 10 &&
-        echo "Checking migration file..." &&
+        echo 'Checking migration file...' &&
         if [ -f /migrations/000_main_migration.sql ]; then
-          echo "Migration file found, running script..." &&
-          PGPASSWORD=$${POSTGRES_PASSWORD} psql -h db -U $${POSTGRES_USER} -d $${POSTGRES_DB} -f /migrations/000_main_migration.sql
+          echo 'Migration file found, running script...' &&
+          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /migrations/000_main_migration.sql
         else
-          echo "Migration file not found or not accessible, creating basic schema..." &&
-          PGPASSWORD=$${POSTGRES_PASSWORD} psql -h db -U $${POSTGRES_USER} -d $${POSTGRES_DB} << EOF
-            -- Create schemas
-            CREATE SCHEMA IF NOT EXISTS api;
-            
-            -- Create necessary tables
+          echo 'Migration file not found or not accessible, creating basic schema...' &&
+          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c 'CREATE SCHEMA IF NOT EXISTS api;' &&
+          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c '
             CREATE TABLE IF NOT EXISTS api.urls (
               id SERIAL PRIMARY KEY,
               original_url TEXT NOT NULL,
               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
-            
+          ' &&
+          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c '
             CREATE TABLE IF NOT EXISTS api.short_links (
               id SERIAL PRIMARY KEY,
               url_id INTEGER REFERENCES api.urls(id),
               code TEXT NOT NULL UNIQUE,
               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
-            
-            -- Create required functions
+          ' &&
+          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c '
             CREATE OR REPLACE FUNCTION api.create_short_link(p_original_url TEXT, p_custom_alias TEXT DEFAULT NULL)
-            RETURNS JSON AS \$\$
+            RETURNS JSON AS $$
             DECLARE
               v_url_id INTEGER;
               v_code TEXT;
             BEGIN
-              -- Insert URL
               INSERT INTO api.urls (original_url) VALUES (p_original_url) RETURNING id INTO v_url_id;
-              
-              -- Use custom alias or generate one
-              v_code := COALESCE(p_custom_alias, '"url"' || v_url_id::TEXT);
-              
-              -- Create short link
+              v_code := COALESCE(p_custom_alias, ''url'' || v_url_id::TEXT);
               INSERT INTO api.short_links (url_id, code) VALUES (v_url_id, v_code);
-              
               RETURN json_build_object(
-                '"success"', TRUE,
-                '"code"', v_code,
-                '"short_url"', '"https://ref.menezmethod.com/r/"' || v_code,
-                '"original_url"', p_original_url
+                ''success'', TRUE,
+                ''code'', v_code,
+                ''short_url'', ''https://ref.menezmethod.com/r/'' || v_code,
+                ''original_url'', p_original_url
               );
             END;
-            \$\$ LANGUAGE plpgsql SECURITY DEFINER;
-            
+            $$ LANGUAGE plpgsql SECURITY DEFINER;
+          ' &&
+          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c '
             CREATE OR REPLACE FUNCTION api.get_original_url(p_code TEXT)
-            RETURNS JSON AS \$\$
+            RETURNS JSON AS $$
             DECLARE
               v_original_url TEXT;
             BEGIN
@@ -84,47 +77,47 @@ services:
               
               IF v_original_url IS NULL THEN
                 RETURN json_build_object(
-                  '"success"', FALSE,
-                  '"error"', '"Short URL not found"'
+                  ''success'', FALSE,
+                  ''error'', ''Short URL not found''
                 );
               END IF;
               
               RETURN json_build_object(
-                '"success"', TRUE,
-                '"original_url"', v_original_url
+                ''success'', TRUE,
+                ''original_url'', v_original_url
               );
             END;
-            \$\$ LANGUAGE plpgsql SECURITY DEFINER;
-            
-            -- Create convenience functions with specific parameter names
+            $$ LANGUAGE plpgsql SECURITY DEFINER;
+          ' &&
+          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c '
             CREATE OR REPLACE FUNCTION api.quick_link(url TEXT, alias TEXT, api_key TEXT DEFAULT NULL)
-            RETURNS JSON AS \$\$
+            RETURNS JSON AS $$
             BEGIN
               RETURN api.create_short_link(url, alias);
             END;
-            \$\$ LANGUAGE plpgsql SECURITY DEFINER;
-          EOF
+            $$ LANGUAGE plpgsql SECURITY DEFINER;
+          '
         fi &&
-        echo "Ensuring roles are set correctly..." &&
-        PGPASSWORD=$${POSTGRES_PASSWORD} psql -h db -U $${POSTGRES_USER} -d $${POSTGRES_DB} << EOF
-          DO \$\$
+        echo 'Ensuring roles are set correctly...' &&
+        PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c '
+          DO $$
           BEGIN
-            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '"anon"') THEN
+            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = ''anon'') THEN
               CREATE ROLE anon NOLOGIN;
             END IF;
-            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '"authenticator"') THEN
+            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = ''authenticator'') THEN
               DROP ROLE IF EXISTS authenticator;
-              CREATE ROLE authenticator WITH LOGIN PASSWORD '"$${POSTGRES_PASSWORD}"' NOINHERIT;
+              CREATE ROLE authenticator WITH LOGIN PASSWORD '''"$POSTGRES_PASSWORD"''' NOINHERIT;
               GRANT anon TO authenticator;
             END IF;
             GRANT USAGE ON SCHEMA api TO anon;
             GRANT USAGE ON SCHEMA api TO authenticator;
             GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA api TO anon;
           END;
-          \$\$;
-        EOF
-        echo "Database initialization completed."
-      '
+          $$;
+        ' &&
+        echo 'Database initialization completed.'
+      "
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
