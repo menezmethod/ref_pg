@@ -25,6 +25,11 @@ services:
       retries: 5
     networks:
       - shortener-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   redis:
     image: redis:alpine
@@ -34,14 +39,19 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
       - shortener-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   postgrest:
     image: postgrest/postgrest:latest
@@ -59,6 +69,17 @@ services:
       - "3001:3000"
     networks:
       - shortener-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   openresty:
     build:
@@ -69,10 +90,25 @@ services:
     depends_on:
       - db
       - postgrest
+    environment:
+      RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-60}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-60}
+      LOG_LEVEL: ${LOG_LEVEL:-notice}
     ports:
       - "8000:80"
     networks:
       - shortener-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -89,6 +125,11 @@ services:
       - pgadmin_data:/var/lib/pgadmin
     networks:
       - shortener-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   swagger:
     image: swaggerapi/swagger-ui
@@ -101,6 +142,11 @@ services:
       - postgrest
     networks:
       - shortener-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   prometheus:
     image: prom/prometheus:latest
@@ -120,6 +166,11 @@ services:
     depends_on:
       - db
     restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   shortener-net:
