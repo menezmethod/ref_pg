@@ -40,6 +40,73 @@ cleanup() {
   exit 0
 }
 
+# Print diagnostic information about environment and networking
+run_diagnostics() {
+  echo "========== ENVIRONMENT DIAGNOSTICS =========="
+  
+  # Container identification
+  echo "CONTAINER INFO:"
+  echo "- Hostname: $(hostname)"
+  echo "- Current user: $(id)"
+  
+  # Network configuration
+  echo "NETWORK CONFIGURATION:"
+  if command -v ip >/dev/null 2>&1; then
+    echo "IP Configuration:"
+    ip addr | grep -E 'inet|eth' || echo "No IP configuration found"
+    echo "Routing table:"
+    ip route || echo "No routing table found"
+  elif command -v ifconfig >/dev/null 2>&1; then
+    echo "Interface configuration:"
+    ifconfig || echo "No interface configuration found"
+  fi
+  
+  # DNS Resolution tests
+  echo "DNS RESOLUTION TESTS:"
+  if command -v dig >/dev/null 2>&1; then
+    echo "Testing DNS resolution for 'db':"
+    dig db || echo "dig command failed for db"
+    echo "Testing DNS resolution for 'db-gwg0scggsk0o8swcgogg04wc':"
+    dig db-gwg0scggsk0o8swcgogg04wc || echo "dig command failed for db-gwg0scggsk0o8swcgogg04wc"
+  elif command -v nslookup >/dev/null 2>&1; then
+    echo "Testing DNS resolution for 'db':"
+    nslookup db || echo "nslookup command failed for db"
+    echo "Testing DNS resolution for 'db-gwg0scggsk0o8swcgogg04wc':"
+    nslookup db-gwg0scggsk0o8swcgogg04wc || echo "nslookup command failed for db-gwg0scggsk0o8swcgogg04wc"
+  fi
+  
+  # Check Docker networks
+  echo "DOCKER NETWORKS:"
+  if command -v cat >/dev/null 2>&1; then
+    echo "Docker networks configuration (if available):"
+    cat /etc/hosts || echo "Cannot access /etc/hosts"
+  fi
+  
+  # Check connectivity to common ports
+  echo "CONNECTIVITY TESTS:"
+  echo "Testing connectivity to db:5432:"
+  if command -v nc >/dev/null 2>&1; then
+    nc -zv db 5432 2>&1 || echo "nc command failed for db:5432"
+    echo "Testing connectivity to db-gwg0scggsk0o8swcgogg04wc:5432:"
+    nc -zv db-gwg0scggsk0o8swcgogg04wc 5432 2>&1 || echo "nc command failed for db-gwg0scggsk0o8swcgogg04wc:5432"
+  fi
+  
+  # List environment variables (excluding passwords)
+  echo "ENVIRONMENT VARIABLES:"
+  env | grep -v -E 'PASSWORD|PASS|SECRET|KEY' | sort || echo "No environment variables found"
+  
+  # Try some common Docker network IPs
+  echo "COMMON DOCKER NETWORK IP SCANS:"
+  for ip in 172.17.0.2 172.17.0.3 172.18.0.2 172.18.0.3; do
+    echo "Testing connectivity to $ip:5432:"
+    if command -v nc >/dev/null 2>&1; then
+      nc -zv $ip 5432 -w 1 2>&1 || echo "nc command failed for $ip:5432"
+    fi
+  done
+  
+  echo "========== END DIAGNOSTICS =========="
+}
+
 # Parse DATABASE_URL to extract components and try multiple host formats
 parse_db_url() {
   # First try the main DB_URI
@@ -159,26 +226,33 @@ wait_for_postgres_host() {
   while [ $attempt -le $max_attempts ]; do
     echo "Attempt $attempt/$max_attempts: Checking PostgreSQL connection at $host:$port..."
     
-    # Try basic TCP connection first
-    (echo > /dev/tcp/$host/$port) >/dev/null 2>&1
+    # Try basic TCP connection first - capture the error output
+    conn_result=$(echo > /dev/tcp/$host/$port 2>&1) || true
+    conn_status=$?
     
-    if [ $? -eq 0 ]; then
+    if [ $conn_status -eq 0 ]; then
       echo "PostgreSQL is up and accepting connections at $host:$port!"
       echo "Verifying with a query..."
       
       # Try to actually connect and run a simple query if we have psql
       if command -v psql >/dev/null 2>&1; then
-        if PGPASSWORD="$DB_PASS" psql -h "$host" -p "$port" -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1" >/dev/null 2>&1; then
+        psql_output=$(PGPASSWORD="$DB_PASS" psql -h "$host" -p "$port" -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1" 2>&1) || true
+        psql_status=$?
+        
+        if [ $psql_status -eq 0 ]; then
           echo "PostgreSQL query successful!"
           return 0
         else
           echo "TCP connection succeeded but PostgreSQL query failed."
+          echo "psql error: $psql_output"
         fi
       else
         echo "TCP connection succeeded, but psql not available for full verification."
         # If we don't have psql, assume TCP connection is enough
         return 0
       fi
+    else
+      echo "Connection attempt failed with output: $conn_result"
     fi
     
     attempt=$((attempt + 1))
@@ -233,6 +307,9 @@ main() {
   # SIGTERM = 15, SIGINT = 2
   trap cleanup 15
   trap cleanup 2
+  
+  # Run diagnostics before attempting connections
+  run_diagnostics
   
   # Parse database URL
   parse_db_url

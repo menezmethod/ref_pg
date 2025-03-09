@@ -9,7 +9,14 @@ RUN apt-get update && \
     iputils-ping \
     net-tools \
     dnsutils \
-    postgresql-client && \
+    postgresql-client \
+    iproute2 \
+    traceroute \
+    curl \
+    telnet \
+    tcpdump \
+    procps \
+    lsof && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
