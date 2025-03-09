@@ -1,0 +1,208 @@
+# nginx.conf - Simple configuration for URL shortener with OpenResty
+#
+# This file is based on the official OpenResty Docker examples
+# and should be modified according to your needs.
+#
+
+worker_processes 1;
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+# Load modules
+# load_module modules/ngx_http_lua_module.so;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /usr/local/openresty/nginx/conf/mime.types;
+    default_type application/octet-stream;
+
+    # Logging settings
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+    access_log /var/log/nginx/access.log main;
+    error_log /var/log/nginx/error.log debug;
+
+    # Optimize sendfile
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+
+    # Set buffer sizes
+    client_body_buffer_size 10k;
+    client_header_buffer_size 4k;
+    client_max_body_size 8m;
+    large_client_header_buffers 4 16k;
+
+    # Gzip compression
+    gzip on;
+    gzip_disable "msie6";
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_buffers 16 8k;
+    gzip_http_version 1.1;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
+    # Rate limiting zones
+    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=${RATE_LIMIT_REQUESTS}r/s;
+    limit_req_zone $binary_remote_addr zone=redirect_limit:10m rate=${RATE_LIMIT_REQUESTS}r/s;
+
+    # We need a resolver for using variables in proxy_pass
+    resolver 127.0.0.11 ipv6=off;
+
+    # Redis connection parameters
+    lua_shared_dict url_cache 10m;
+
+    # Security headers
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; object-src 'none';" always;
+
+    # CORS settings
+    add_header Access-Control-Allow-Origin "${CORS_ALLOW_ORIGIN}" always;
+    add_header Access-Control-Allow-Methods "GET, POST, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization,X-API-Key" always;
+    add_header Access-Control-Expose-Headers "Content-Length,Content-Range" always;
+
+    # Proxy settings
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # Timeouts
+    proxy_connect_timeout 60s;
+    proxy_send_timeout 60s;
+    proxy_read_timeout 60s;
+
+    # Define servers here
+    server {
+        listen 80;
+        server_name localhost;
+
+        # Health check endpoint
+        location /health {
+            access_log off;
+            add_header Content-Type text/plain;
+            return 200 "OK";
+        }
+
+        # Home page
+        location = / {
+            default_type text/html;
+            return 200 '<!DOCTYPE html>
+            <html>
+            <head>
+                <title>URL Shortener</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }
+                    h1 { color: #333; }
+                </style>
+            </head>
+            <body>
+                <h1>URL Shortener Service</h1>
+                <p>This is a URL shortening service. Use the API to create and manage short links.</p>
+            </body>
+            </html>';
+        }
+
+        # API passthrough to PostgREST
+        location /api/ {
+            limit_req zone=api_limit burst=10 nodelay;
+            
+            # Rewrite the URI to remove the /api prefix
+            rewrite ^/api/(.*) /$1 break;
+            
+            # Pass the request to PostgREST
+            proxy_pass http://postgrest:3000/;
+            
+            # Forward the X-API-Key header to PostgREST
+            proxy_set_header X-API-Key $http_x_api_key;
+            
+            # Handle CORS preflight requests
+            if ($request_method = 'OPTIONS') {
+                add_header 'Access-Control-Allow-Origin' "${CORS_ALLOW_ORIGIN}" always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization,X-API-Key' always;
+                add_header 'Access-Control-Max-Age' 1728000;
+                add_header 'Content-Type' 'text/plain; charset=utf-8';
+                add_header 'Content-Length' 0;
+                return 204;
+            }
+        }
+
+        # Direct access to RPC functions - Updated to handle both formats
+        location ~ ^/api/rpc/([a-zA-Z_]+)$ {
+            limit_req zone=api_limit burst=10 nodelay;
+            
+            set $func_name $1;
+            
+            # Pass the request directly to the RPC function
+            proxy_pass http://postgrest:3000/rpc/$func_name;
+            proxy_set_header Content-Type application/json;
+            
+            # Forward the X-API-Key header to PostgREST
+            proxy_set_header X-API-Key $http_x_api_key;
+            
+            # Handle CORS preflight requests
+            if ($request_method = 'OPTIONS') {
+                add_header 'Access-Control-Allow-Origin' "${CORS_ALLOW_ORIGIN}" always;
+                add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+                add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization,X-API-Key' always;
+                add_header 'Access-Control-Max-Age' 1728000;
+                add_header 'Content-Type' 'text/plain; charset=utf-8';
+                add_header 'Content-Length' 0;
+                return 204;
+            }
+        }
+
+        # URL shortener redirect
+        location ~ ^/r/([a-zA-Z0-9]+)$ {
+            limit_req zone=redirect_limit burst=20 nodelay;
+            
+            set $code $1;
+            
+            # Make a request to the API to get the original URL
+            proxy_pass http://postgrest:3000/rpc/get_original_url?p_code=$code;
+            proxy_set_header Content-Type application/json;
+            
+            # Handle the response with a Lua header filter
+            header_filter_by_lua_block {
+                local cjson = require "cjson"
+                
+                -- Get the response body
+                local resp_body = ngx.arg[1]
+                
+                -- If the response is valid JSON and contains an original_url
+                if resp_body and resp_body ~= "" then
+                    local success, data = pcall(cjson.decode, resp_body)
+                    if success and data and data.original_url then
+                        -- Set up a redirect to the original URL
+                        ngx.header.content_type = nil
+                        ngx.header.content_length = nil
+                        ngx.status = 302
+                        ngx.header.location = data.original_url
+                        
+                        -- Clear the response body
+                        ngx.arg[1] = ""
+                    end
+                end
+            }
+        }
+
+        # Error page for API errors
+        error_page 500 502 503 504 /50x.html;
+        location = /50x.html {
+            root /usr/local/openresty/nginx/html;
+        }
+    }
+} 

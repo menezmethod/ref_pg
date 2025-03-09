@@ -173,8 +173,13 @@ services:
     ports:
       - "8001:80"
     volumes:
-      - ./docker/openresty/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    command: /usr/local/openresty/bin/openresty -g "daemon off;"
+      - ./nginx.conf.coolify:/tmp/nginx.conf:ro
+    command: |
+      sh -c "
+        mkdir -p /etc/nginx/conf.d
+        cp /tmp/nginx.conf /etc/nginx/conf.d/default.conf
+        /usr/local/openresty/bin/openresty -g \"daemon off;\"
+      "
     networks:
       - shortener-net
 
