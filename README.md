@@ -1,97 +1,108 @@
 # URL Shortener Service
 
-A simple URL shortener microservice built with Docker, PostgreSQL, PostgREST, and OpenResty.
+A robust URL shortening service built with PostgreSQL, PostgREST, and OpenResty.
 
-## Project Structure
+## Features
 
-```
-.
-├── config/                  # Configuration files
-├── docker/                  # Docker-related files for services
-│   ├── openresty/           # OpenResty configuration
-│   │   └── nginx.conf       # Nginx configuration
-│   └── postgres/            # PostgreSQL initialization scripts
-├── migrations/              # Database migration files
-│   └── 000_main_migration.sql  # Main database schema
-├── sql/                     # SQL files organized by purpose
-│   ├── init/                # Database initialization scripts
-│   │   ├── init-db.sh       # Main initialization script
-│   │   └── update-pg-hba.sh # Script to update PostgreSQL authentication
-│   ├── migrations/          # Database migrations
-│   └── schemas/             # Schema definitions
-├── docker-compose.yml       # Docker Compose configuration
-└── .env                     # Environment variables
-```
+- Create short URLs with custom aliases
+- Track link clicks with detailed analytics
+- API key authentication
+- Rate limiting
+- RESTful API
+
+## Architecture
+
+This project uses:
+
+- **PostgreSQL**: Database with functions for business logic
+- **PostgREST**: Auto-generated REST API from the database
+- **OpenResty**: High-performance web server for URL redirection
 
 ## Getting Started
 
 ### Prerequisites
 
-- Docker
-- Docker Compose
+- Docker and Docker Compose
 
-### Setup and Run
+### Installation
 
-1. Clone the repository
-2. Create a `.env` file with the required environment variables (see `.env.example`)
-3. Start the services:
+1. Clone this repository
+2. Run the service:
 
 ```bash
 docker-compose up -d
 ```
 
-4. Access the URL shortener service at http://localhost:8080
+## Database Migration Verification
 
-## API Usage
+This project includes tools to verify that database migrations have been applied correctly, which is especially useful when deploying to platforms like Coolify.
 
-### Create a Short URL
+### Verification Script
 
-```bash
-curl -X POST "http://localhost:8080/api/create_short_link" \
-  -H "Content-Type: application/json" \
-  -d '{"p_original_url": "https://example.com"}'
-```
+The `migrations/999_verify_migration.sql` script runs after all other migrations and:
 
-### Create a Short URL with Custom Alias
+1. Creates a `migration_history` table to track migration status
+2. Checks if all required database objects (schemas, tables, functions, roles) exist
+3. Raises clear error messages if anything is missing
 
-```bash
-curl -X POST "http://localhost:8080/api/create_short_link" \
-  -H "Content-Type: application/json" \
-  -d '{"p_original_url": "https://example.com", "p_custom_alias": "my-custom-link"}'
-```
+### Diagnostic Tool
 
-### Quick Link Creation (Admin)
+The `scripts/diagnose_db.sh` script helps diagnose database issues:
 
 ```bash
-curl -X POST "http://localhost:8080/api/quick_link" \
-  -H "Content-Type: application/json" \
-  -d '{"p_url": "https://example.com", "p_password": "your-master-password"}'
+# Run locally
+./scripts/diagnose_db.sh
+
+# Or inside the container
+docker exec -it url_shortener_db bash -c "/app/scripts/diagnose_db.sh"
 ```
 
-## Services
+This tool will:
 
-- **PostgreSQL**: Database server (port 5432)
-- **PostgREST**: REST API for PostgreSQL (port 3000)
-- **OpenResty**: Web server and URL redirection (port 8080)
-- **Swagger UI**: API documentation (port 8081)
+1. Check database connection
+2. Verify migration history
+3. Check for required schemas, tables, and functions
+4. Test role permissions
+5. Verify PostgREST connection
+6. Provide a detailed report of any issues
 
-## Development
+## Troubleshooting
 
-### Database Migrations
+If you encounter issues with the database setup:
 
-All database schemas are consolidated in a single main migration file: `migrations/000_main_migration.sql`
+1. Check the logs:
+   ```bash
+   docker-compose logs db
+   ```
 
-### Authentication
+2. Run the diagnostic script:
+   ```bash
+   ./scripts/diagnose_db.sh
+   ```
 
-The service uses a master password for admin operations and API keys for regular operations.
+3. If migrations aren't being applied:
+   ```bash
+   # Remove the volume and start fresh
+   docker-compose down -v
+   docker-compose up -d
+   ```
 
-To get an API key:
+4. Check if the authenticator role has the correct password:
+   ```bash
+   # The password should match POSTGRES_PASSWORD in your environment
+   docker exec -it url_shortener_db psql -U postgres -c "ALTER ROLE authenticator WITH PASSWORD 'your_password';"
+   ```
 
-```bash
-curl -X POST "http://localhost:8080/api/get_api_key" \
-  -H "Content-Type: application/json" \
-  -d '{"p_password": "your-master-password"}'
-```
+## Environment Variables
+
+- `POSTGRES_PASSWORD`: Database password (default: postgres)
+- `POSTGRES_USER`: Database user (default: postgres)
+- `POSTGRES_DB`: Database name (default: url_shortener)
+- `JWT_SECRET`: Secret for JWT tokens
+- `RATE_LIMIT_REQUESTS`: Rate limit requests per window (default: 60)
+- `RATE_LIMIT_WINDOW`: Rate limit window in seconds (default: 60)
+- `LOG_LEVEL`: Logging level (default: debug)
+- `CORS_ALLOW_ORIGIN`: CORS allowed origins (default: *)
 
 ## License
 
