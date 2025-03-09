@@ -70,16 +70,16 @@ services:
           echo 'Migration applied successfully!' &&
           
           echo 'Setting up permissions...' &&
-          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c '
-            DO $$
+          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c "
+            DO \$\$
             BEGIN
                 -- Ensure roles exist
-                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = "anon") THEN
+                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'anon') THEN
                     CREATE ROLE anon NOLOGIN;
                 END IF;
                 
-                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = "authenticator") THEN
-                    CREATE ROLE authenticator WITH LOGIN PASSWORD "'"$POSTGRES_PASSWORD"'" NOINHERIT;
+                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'authenticator') THEN
+                    CREATE ROLE authenticator WITH LOGIN PASSWORD '$POSTGRES_PASSWORD' NOINHERIT;
                     GRANT anon TO authenticator;
                 END IF;
                 
@@ -89,27 +89,27 @@ services:
                 GRANT USAGE ON ALL SEQUENCES IN SCHEMA api TO anon;
                 GRANT SELECT ON ALL TABLES IN SCHEMA api TO anon;
             END
-            $$;
-          ' &&
+            \$\$;
+          " &&
           echo 'Permissions set up successfully!'
         else
           echo 'Migration file not found. Setting up basic schema...' &&
-          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c 'CREATE SCHEMA IF NOT EXISTS api;' &&
-          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c '
+          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c "CREATE SCHEMA IF NOT EXISTS api;" &&
+          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c "
             CREATE TABLE IF NOT EXISTS api.urls (
               id SERIAL PRIMARY KEY,
               original_url TEXT NOT NULL,
               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
-          ' &&
-          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c '
+          " &&
+          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c "
             CREATE TABLE IF NOT EXISTS api.short_links (
               id SERIAL PRIMARY KEY,
               url_id INTEGER REFERENCES api.urls(id),
               code TEXT NOT NULL UNIQUE,
               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
-          ' &&
+          " &&
           echo 'Basic schema created.'
         fi &&
         
