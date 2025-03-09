@@ -20,105 +20,17 @@ services:
     depends_on:
       - db
     volumes:
-      - ./migrations:/migrations_source
+      - ./migrations:/migrations
+      - ./init-production-db.sh:/init-db.sh
     command: >
-      bash -c "
-        echo 'Waiting for PostgreSQL...' &&
-        sleep 10 &&
-        
-        # Create temp directory for migration
-        echo 'Setting up migration environment...' &&
-        mkdir -p /tmp/migrations &&
-        
-        # Try to find the migration file
-        echo 'Searching for migration file...' &&
-        MIGRATION_FOUND=false &&
-        
-        # Check if it's a directory
-        if [ -d '/migrations_source/000_main_migration.sql' ]; then
-          echo 'Found a directory instead of a file. Searching inside...' &&
-          
-          # Try to find SQL files inside
-          SQL_FILE=$(find /migrations_source/000_main_migration.sql -type f -name '*.sql' | head -1) &&
-          if [ -n "$SQL_FILE" ]; then
-            echo "Found SQL file: $SQL_FILE" &&
-            cp "$SQL_FILE" /tmp/migrations/000_main_migration.sql &&
-            MIGRATION_FOUND=true &&
-            echo 'Migration file copied successfully!'
-          else
-            # Try a direct path as fallback
-            echo 'No SQL files found. Trying direct path...' &&
-            if [ -f '/migrations_source/000_main_migration.sql/000_main_migration.sql' ]; then
-              cp /migrations_source/000_main_migration.sql/000_main_migration.sql /tmp/migrations/000_main_migration.sql &&
-              MIGRATION_FOUND=true &&
-              echo 'Found migration file at direct path!'
-            fi
-          fi
-        
-        # Check if it's a regular file
-        elif [ -f '/migrations_source/000_main_migration.sql' ]; then
-          echo 'Found migration file directly.' &&
-          cp /migrations_source/000_main_migration.sql /tmp/migrations/000_main_migration.sql &&
-          MIGRATION_FOUND=true &&
-          echo 'Migration file copied successfully!'
-        fi &&
-        
-        # Apply migration if found
-        if [ "$MIGRATION_FOUND" = true ]; then
-          echo 'Applying migration...' &&
-          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -f /tmp/migrations/000_main_migration.sql &&
-          echo 'Migration applied successfully!' &&
-          
-          echo 'Setting up permissions...' &&
-          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c "
-            DO \$\$
-            BEGIN
-                -- Ensure roles exist
-                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'anon') THEN
-                    CREATE ROLE anon NOLOGIN;
-                END IF;
-                
-                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'authenticator') THEN
-                    CREATE ROLE authenticator WITH LOGIN PASSWORD '$POSTGRES_PASSWORD' NOINHERIT;
-                    GRANT anon TO authenticator;
-                END IF;
-                
-                -- Grant permissions
-                GRANT USAGE ON SCHEMA api TO anon;
-                GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA api TO anon;
-                GRANT USAGE ON ALL SEQUENCES IN SCHEMA api TO anon;
-                GRANT SELECT ON ALL TABLES IN SCHEMA api TO anon;
-            END
-            \$\$;
-          " &&
-          echo 'Permissions set up successfully!'
-        else
-          echo 'Migration file not found. Setting up basic schema...' &&
-          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c "CREATE SCHEMA IF NOT EXISTS api;" &&
-          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c "
-            CREATE TABLE IF NOT EXISTS api.urls (
-              id SERIAL PRIMARY KEY,
-              original_url TEXT NOT NULL,
-              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-          " &&
-          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c "
-            CREATE TABLE IF NOT EXISTS api.short_links (
-              id SERIAL PRIMARY KEY,
-              url_id INTEGER REFERENCES api.urls(id),
-              code TEXT NOT NULL UNIQUE,
-              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-          " &&
-          echo 'Basic schema created.'
-        fi &&
-        
-        echo 'Database initialization completed.'
-      "
+      bash -c "chmod +x /init-db.sh && /init-db.sh"
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
+      DB_HOST: db
+      DB_PORT: 5432
+      MASTER_PASSWORD: ${MASTER_PASSWORD:-master123}
     networks:
       - shortener-net
 
