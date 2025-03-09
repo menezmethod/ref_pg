@@ -45,9 +45,10 @@ services:
               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
           ' &&
-          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c \"
+          echo 'Creating URL shortener functions...' &&
+          echo \"
             CREATE OR REPLACE FUNCTION api.create_short_link(p_original_url TEXT, p_custom_alias TEXT DEFAULT NULL)
-            RETURNS JSON AS \\$function\\$
+            RETURNS JSON AS \$\$
             DECLARE
               v_url_id INTEGER;
               v_code TEXT;
@@ -62,11 +63,10 @@ services:
                 'original_url', p_original_url
               );
             END;
-            \\$function\\$ LANGUAGE plpgsql SECURITY DEFINER;
-          \" &&
-          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c \"
+            \$\$ LANGUAGE plpgsql SECURITY DEFINER;
+
             CREATE OR REPLACE FUNCTION api.get_original_url(p_code TEXT)
-            RETURNS JSON AS \\$function\\$
+            RETURNS JSON AS \$\$
             DECLARE
               v_original_url TEXT;
             BEGIN
@@ -87,20 +87,20 @@ services:
                 'original_url', v_original_url
               );
             END;
-            \\$function\\$ LANGUAGE plpgsql SECURITY DEFINER;
-          \" &&
-          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c \"
+            \$\$ LANGUAGE plpgsql SECURITY DEFINER;
+
             CREATE OR REPLACE FUNCTION api.quick_link(url TEXT, alias TEXT, api_key TEXT DEFAULT NULL)
-            RETURNS JSON AS \\$function\\$
+            RETURNS JSON AS \$\$
             BEGIN
               RETURN api.create_short_link(url, alias);
             END;
-            \\$function\\$ LANGUAGE plpgsql SECURITY DEFINER;
-          \"
+            \$\$ LANGUAGE plpgsql SECURITY DEFINER;
+          \" > /tmp/functions.sql &&
+          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /tmp/functions.sql
         fi &&
         echo 'Ensuring roles are set correctly...' &&
-        PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -c \"
-          DO \\$\\$
+        echo \"
+          DO \$\$
           BEGIN
             IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'anon') THEN
               CREATE ROLE anon NOLOGIN;
@@ -114,8 +114,9 @@ services:
             GRANT USAGE ON SCHEMA api TO authenticator;
             GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA api TO anon;
           END;
-          \\$\\$;
-        \" &&
+          \$\$;
+        \" > /tmp/roles.sql &&
+        PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /tmp/roles.sql &&
         echo 'Database initialization completed.'
       "
     environment:
@@ -166,8 +167,7 @@ services:
       sh -c '
         echo "Creating simplified nginx configuration..." &&
         mkdir -p /usr/local/openresty/lua &&
-        cat > /etc/nginx/conf.d/default.conf << EOF
-        server {
+        echo "server {
             listen 80;
             server_name localhost;
 
@@ -175,13 +175,13 @@ services:
             location /health {
                 access_log off;
                 add_header Content-Type text/plain;
-                return 200 "OK";
+                return 200 \"OK\";
             }
 
             # Home page
             location = / {
                 default_type text/html;
-                return 200 "<!DOCTYPE html><html><head><title>URL Shortener</title></head><body><h1>URL Shortener Service</h1><p>Use the API to create and manage short links.</p></body></html>";
+                return 200 \"<!DOCTYPE html><html><head><title>URL Shortener</title></head><body><h1>URL Shortener Service</h1><p>Use the API to create and manage short links.</p></body></html>\";
             }
 
             # API passthrough to PostgREST
@@ -215,9 +215,8 @@ services:
             location = /50x.html {
                 root /usr/local/openresty/nginx/html;
             }
-        }
-        EOF
-        echo "Starting OpenResty with simplified configuration..."
+        }" > /etc/nginx/conf.d/default.conf &&
+        echo "Starting OpenResty with simplified configuration..." &&
         exec /usr/local/openresty/bin/openresty -g "daemon off;"
       '
     networks:
