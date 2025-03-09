@@ -107,6 +107,33 @@ run_diagnostics() {
   echo "========== END DIAGNOSTICS =========="
 }
 
+# Resolve hostname to IP address to work around DNS issues
+resolve_hostname() {
+  hostname="$1"
+  
+  # Try different methods to get IP address
+  if command -v getent >/dev/null 2>&1; then
+    ip_address=$(getent hosts "$hostname" | awk '{ print $1 }')
+  elif command -v dig >/dev/null 2>&1; then
+    ip_address=$(dig +short "$hostname")
+  elif command -v nslookup >/dev/null 2>&1; then
+    ip_address=$(nslookup "$hostname" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | tail -1)
+  elif command -v host >/dev/null 2>&1; then
+    ip_address=$(host "$hostname" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
+  else
+    echo "Cannot resolve hostname: no resolution tools available"
+    return 1
+  fi
+  
+  if [ -n "$ip_address" ]; then
+    echo "$ip_address"
+    return 0
+  else
+    echo "Failed to resolve $hostname to an IP address"
+    return 1
+  fi
+}
+
 # Parse DATABASE_URL to extract components and try multiple host formats
 parse_db_url() {
   # First try the main DB_URI
@@ -152,52 +179,130 @@ parse_db_url() {
 wait_for_postgres() {
   echo "Waiting for PostgreSQL to be ready..."
   
-  # First try primary host
-  if wait_for_postgres_host "$DB_HOST" "$DB_PORT"; then
-    update_connection_string "$DB_HOST"
-    return 0
+  # Try to resolve hostname to IP first (to work around DNS issues)
+  db_ip=""
+  if [ -n "$DB_HOST" ]; then
+    echo "Attempting to resolve $DB_HOST to an IP address..."
+    db_ip=$(resolve_hostname "$DB_HOST" 2>/dev/null) || true
+    
+    if [ -n "$db_ip" ]; then
+      echo "Resolved $DB_HOST to IP: $db_ip"
+      export DB_HOST_IP="$db_ip"
+      
+      # Try connecting to the resolved IP
+      if wait_for_postgres_host "$db_ip" "$DB_PORT"; then
+        update_connection_string "$db_ip"
+        return 0
+      fi
+    else
+      echo "Failed to resolve $DB_HOST to an IP address"
+    fi
+  fi
+  
+  # First try primary host (if IP resolution failed)
+  if [ -z "$db_ip" ]; then
+    if wait_for_postgres_host "$DB_HOST" "$DB_PORT"; then
+      # Try to get the IP that was used successfully
+      if command -v psql >/dev/null 2>&1; then
+        # Use psql to get the actual server IP
+        server_ip=$(PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT inet_server_addr();" 2>/dev/null) || true
+        if [ -n "$server_ip" ]; then
+          echo "PostgreSQL server actual IP: $server_ip (from server_addr)"
+          update_connection_string "$server_ip"
+          return 0
+        else
+          update_connection_string "$DB_HOST"
+        fi
+      else
+        update_connection_string "$DB_HOST"
+      fi
+      return 0
+    fi
   fi
   
   # If that fails and we have a fallback hostname, try the fallback
   if [ -n "$DB_HOST_FALLBACK" ]; then
     echo "Primary database host unreachable, trying fallback host: $DB_HOST_FALLBACK"
+    # Try to resolve fallback hostname to IP
+    db_ip_fallback=$(resolve_hostname "$DB_HOST_FALLBACK" 2>/dev/null) || true
+    
+    if [ -n "$db_ip_fallback" ]; then
+      echo "Resolved fallback $DB_HOST_FALLBACK to IP: $db_ip_fallback"
+      if wait_for_postgres_host "$db_ip_fallback" "$DB_PORT"; then
+        update_connection_string "$db_ip_fallback"
+        return 0
+      fi
+    fi
+    
+    # Try with hostname directly if IP resolution failed
     if wait_for_postgres_host "$DB_HOST_FALLBACK" "$DB_PORT"; then
-      update_connection_string "$DB_HOST_FALLBACK"
+      # Try to get the IP that was used successfully
+      if command -v psql >/dev/null 2>&1; then
+        server_ip=$(PGPASSWORD="$DB_PASS" psql -h "$DB_HOST_FALLBACK" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT inet_server_addr();" 2>/dev/null) || true
+        if [ -n "$server_ip" ]; then
+          echo "PostgreSQL server actual IP from fallback: $server_ip (from server_addr)"
+          update_connection_string "$server_ip"
+          return 0
+        else
+          update_connection_string "$DB_HOST_FALLBACK"
+        fi
+      else
+        update_connection_string "$DB_HOST_FALLBACK"
+      fi
       return 0
     fi
   fi
   
+  # Try IP addresses on our own network subnets first
+  echo "Trying to find PostgreSQL on local network subnets..."
+  my_ips=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || ifconfig | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || echo "")
+  
+  for my_ip in $my_ips; do
+    if [ "$my_ip" = "127.0.0.1" ]; then
+      continue  # Skip localhost
+    fi
+    
+    # Extract subnet prefix (first 3 octets)
+    subnet=$(echo "$my_ip" | cut -d. -f1-3)
+    echo "Scanning subnet: $subnet.* (from our interface $my_ip)"
+    
+    for i in $(seq 1 10); do
+      ip="${subnet}.${i}"
+      if [ "$ip" = "$my_ip" ]; then
+        continue  # Skip our own IP
+      fi
+      
+      echo "Scanning subnet: trying $ip"
+      if wait_for_postgres_host "$ip" "$DB_PORT" 3; then  # Only try 3 times per IP
+        update_connection_string "$ip"
+        return 0
+      fi
+    done
+  done
+  
   # Try some common Docker network IPs
-  common_docker_ips="172.17.0.1 172.17.0.2 172.17.0.3 172.17.0.4 172.17.0.5 172.18.0.1 172.18.0.2 172.18.0.3 172.18.0.4 172.18.0.5 172.19.0.1 172.19.0.2 172.19.0.3 172.19.0.4 172.19.0.5 192.168.1.1 192.168.1.2 192.168.1.3 192.168.1.4 192.168.1.5"
+  common_docker_ips="172.19.0.2 172.19.0.3 172.19.0.4 172.20.0.2 172.20.0.3 172.20.0.4 172.17.0.2 172.17.0.3 172.18.0.2 172.18.0.3 172.19.0.1 172.20.0.1 172.17.0.1 172.18.0.1"
   
   for ip in $common_docker_ips; do
     echo "Trying common Docker IP: $ip"
-    if wait_for_postgres_host "$ip" "$DB_PORT"; then
+    if wait_for_postgres_host "$ip" "$DB_PORT" 3; then  # Only try 3 times per IP
       update_connection_string "$ip"
       return 0
     fi
   done
+  
+  # Try connecting to "host.docker.internal" which is a special Docker DNS name on some platforms
+  echo "Trying host.docker.internal..."
+  if wait_for_postgres_host "host.docker.internal" "$DB_PORT" 3; then
+    update_connection_string "host.docker.internal"
+    return 0
+  fi
   
   # If all else fails, use DNS to try to discover the database
   echo "Attempting service discovery..."
   if command -v nslookup >/dev/null 2>&1; then
     nslookup db 2>/dev/null || true
   fi
-  
-  # Try to find the database through subnet scanning
-  for subnet in "172.17.0" "172.18.0" "172.19.0" "192.168.1"; do
-    for i in $(seq 1 10); do
-      ip="${subnet}.${i}"
-      echo "Scanning subnet: trying $ip"
-      if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then
-        echo "Host $ip is responding to ping, checking PostgreSQL..."
-        if wait_for_postgres_host "$ip" "$DB_PORT" 5; then  # Only try 5 times per IP
-          update_connection_string "$ip"
-          return 0
-        fi
-      fi
-    done
-  done
   
   # If we get here, all attempts failed
   echo "Failed to connect to any PostgreSQL host"
@@ -208,9 +313,28 @@ wait_for_postgres() {
 update_connection_string() {
   working_host="$1"
   echo "Updating connection string to use working host: $working_host"
+  
+  # Save the successful host details
   export DB_HOST="$working_host"
   export PGRST_DB_URI="postgres://${DB_USER}:${DB_PASS}@${working_host}:${DB_PORT}/${DB_NAME}"
   echo "New connection string: postgres://${DB_USER}:****@${working_host}:${DB_PORT}/${DB_NAME}"
+  
+  # Save to hosts file if we have permission
+  if [ -w /etc/hosts ]; then
+    if ! grep -q "$working_host db" /etc/hosts; then
+      echo "Adding $working_host to /etc/hosts for 'db'"
+      echo "$working_host db" >> /etc/hosts
+    fi
+    if ! grep -q "$working_host db-gwg0scggsk0o8swcgogg04wc" /etc/hosts; then
+      echo "Adding $working_host to /etc/hosts for 'db-gwg0scggsk0o8swcgogg04wc'"
+      echo "$working_host db-gwg0scggsk0o8swcgogg04wc" >> /etc/hosts
+    fi
+  else
+    echo "Note: Cannot update /etc/hosts (no write permission)"
+  fi
+  
+  # Write to a file for reference
+  echo "$working_host" > /tmp/db_host_ip.txt
 }
 
 # Helper function to check a specific host/port combination
@@ -226,33 +350,59 @@ wait_for_postgres_host() {
   while [ $attempt -le $max_attempts ]; do
     echo "Attempt $attempt/$max_attempts: Checking PostgreSQL connection at $host:$port..."
     
-    # Try basic TCP connection first - capture the error output
-    conn_result=$(echo > /dev/tcp/$host/$port 2>&1) || true
-    conn_status=$?
-    
-    if [ $conn_status -eq 0 ]; then
-      echo "PostgreSQL is up and accepting connections at $host:$port!"
-      echo "Verifying with a query..."
-      
-      # Try to actually connect and run a simple query if we have psql
-      if command -v psql >/dev/null 2>&1; then
-        psql_output=$(PGPASSWORD="$DB_PASS" psql -h "$host" -p "$port" -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1" 2>&1) || true
-        psql_status=$?
+    # Try to connect using nc first (most reliable for basic connectivity)
+    if command -v nc >/dev/null 2>&1; then
+      if nc -z -w 5 "$host" "$port" >/dev/null 2>&1; then
+        echo "TCP connection to $host:$port successful with nc!"
+        psql_success=1
         
-        if [ $psql_status -eq 0 ]; then
-          echo "PostgreSQL query successful!"
-          return 0
+        # Try to actually connect and run a simple query if we have psql
+        if command -v psql >/dev/null 2>&1; then
+          psql_output=$(PGPASSWORD="$DB_PASS" psql -h "$host" -p "$port" -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1" 2>&1) || psql_success=0
+          
+          if [ "$psql_success" = "1" ]; then
+            echo "PostgreSQL query successful!"
+            return 0
+          else
+            echo "TCP connection succeeded but PostgreSQL query failed."
+            echo "psql error: $psql_output"
+          fi
         else
-          echo "TCP connection succeeded but PostgreSQL query failed."
-          echo "psql error: $psql_output"
+          echo "TCP connection succeeded, but psql not available for full verification."
+          # If we don't have psql, assume TCP connection is enough
+          return 0
         fi
-      else
-        echo "TCP connection succeeded, but psql not available for full verification."
-        # If we don't have psql, assume TCP connection is enough
-        return 0
       fi
     else
-      echo "Connection attempt failed with output: $conn_result"
+      # Fallback to /dev/tcp if nc is not available
+      { 
+        exec 3>/dev/null
+        exec 3>/dev/tcp/$host/$port
+        conn_status=$?
+        exec 3>&-
+      } 2>/dev/null
+      
+      if [ $conn_status -eq 0 ]; then
+        echo "TCP connection to $host:$port successful with /dev/tcp!"
+        psql_success=1
+        
+        # Try to actually connect and run a simple query if we have psql
+        if command -v psql >/dev/null 2>&1; then
+          psql_output=$(PGPASSWORD="$DB_PASS" psql -h "$host" -p "$port" -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1" 2>&1) || psql_success=0
+          
+          if [ "$psql_success" = "1" ]; then
+            echo "PostgreSQL query successful!"
+            return 0
+          else
+            echo "TCP connection succeeded but PostgreSQL query failed."
+            echo "psql error: $psql_output"
+          fi
+        else
+          echo "TCP connection succeeded, but psql not available for full verification."
+          # If we don't have psql, assume TCP connection is enough
+          return 0
+        fi
+      fi
     fi
     
     attempt=$((attempt + 1))
@@ -261,35 +411,6 @@ wait_for_postgres_host() {
   
   echo "Failed to connect to PostgreSQL at $host:$port after $max_attempts attempts"
   return 1
-}
-
-# Check that the api schema exists
-check_schema() {
-  echo "Checking if schema '${PGRST_DB_SCHEMA}' exists..."
-  
-  # We use the environment variables set by parse_db_url
-  if PGPASSWORD=${POSTGRES_PASSWORD} psql -h $DB_HOST -p $DB_PORT -U ${POSTGRES_USER:-postgres} -d $DB_NAME -c "SELECT schema_name FROM information_schema.schemata WHERE schema_name = '${PGRST_DB_SCHEMA}';" | grep -q "${PGRST_DB_SCHEMA}"; then
-    echo "Schema '${PGRST_DB_SCHEMA}' exists!"
-    return 0
-  else
-    echo "Schema '${PGRST_DB_SCHEMA}' does not exist in the database."
-    echo "Please ensure the database migration has been applied correctly."
-    return 1
-  fi
-}
-
-# Check that the authenticator role exists
-check_role() {
-  echo "Checking if role '${PGRST_DB_ANON_ROLE}' exists..."
-  
-  if PGPASSWORD=${POSTGRES_PASSWORD} psql -h $DB_HOST -p $DB_PORT -U ${POSTGRES_USER:-postgres} -d $DB_NAME -c "SELECT rolname FROM pg_roles WHERE rolname = '${PGRST_DB_ANON_ROLE}';" | grep -q "${PGRST_DB_ANON_ROLE}"; then
-    echo "Role '${PGRST_DB_ANON_ROLE}' exists!"
-    return 0
-  else
-    echo "Role '${PGRST_DB_ANON_ROLE}' does not exist in the database."
-    echo "Please ensure the database migration has been applied correctly."
-    return 1
-  fi
 }
 
 # Main execution logic
@@ -324,10 +445,21 @@ main() {
   fi
   
   # Wait for PostgreSQL to be ready - with longer timeout
-  wait_for_postgres || echo "WARNING: Database connection check failed, but continuing anyway..."
+  if wait_for_postgres; then
+    echo "Successfully connected to PostgreSQL!"
+  else  
+    echo "WARNING: Database connection check failed, but continuing anyway..."
+  fi
   
+  # The connection string is now updated with a working host
   echo "Starting PostgREST in foreground mode..."
   echo "Using database connection: $PGRST_DB_URI"
+  
+  # Export any direct IP address found as environment variables
+  if [ -n "$DB_HOST_IP" ]; then
+    echo "Exporting resolved database IP to PGHOST: $DB_HOST_IP"
+    export PGHOST="$DB_HOST_IP"  # This will be used by the psql CLI
+  fi
   
   # Start PostgREST in the foreground, but keep script running
   postgrest &
