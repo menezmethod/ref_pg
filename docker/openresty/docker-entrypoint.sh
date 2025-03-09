@@ -5,13 +5,14 @@ set -e
 RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-60}
 RATE_LIMIT_WINDOW=${RATE_LIMIT_WINDOW:-60}
 LOG_LEVEL=${LOG_LEVEL:-notice}
+CORS_ALLOW_ORIGIN=${CORS_ALLOW_ORIGIN:-'*'}
 
 # Create a temporary config file in a location that should be writable
 TEMP_CONF="/tmp/nginx.conf"
 
 # Process the nginx.conf template to a temporary location first
 echo "Generating config file from template..."
-envsubst '${RATE_LIMIT_REQUESTS} ${RATE_LIMIT_WINDOW} ${LOG_LEVEL}' \
+envsubst '${RATE_LIMIT_REQUESTS} ${RATE_LIMIT_WINDOW} ${LOG_LEVEL} ${CORS_ALLOW_ORIGIN}' \
   < /usr/local/openresty/nginx/conf/nginx.conf.template \
   > "${TEMP_CONF}"
 
@@ -30,6 +31,7 @@ fi
 echo "Configuration:"
 echo "- Rate limit: ${RATE_LIMIT_REQUESTS} requests per ${RATE_LIMIT_WINDOW} minutes"
 echo "- Log level: ${LOG_LEVEL}"
+echo "- CORS allow origin: ${CORS_ALLOW_ORIGIN}"
 
 # Execute the CMD with the possibly modified options
 if [ -n "${NGINX_OPTS}" ]; then

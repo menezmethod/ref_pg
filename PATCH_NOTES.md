@@ -1,5 +1,16 @@
 # Patch Notes - URL Shortener Coolify Deployment Fixes
 
+## Version 1.1.5 - 2025-03-09
+
+This patch addresses the CORS variable issue in the OpenResty configuration.
+
+### Bug Fixes for Coolify
+
+1. **OpenResty CORS Variable Fix**
+   - Added default CORS_ALLOW_ORIGIN environment variable in the entrypoint script
+   - Updated envsubst command to include the CORS variable in substitution
+   - Fixed the "unknown cors_allow_origin variable" error that was preventing the container from starting
+
 ## Version 1.1.4 - 2025-03-09
 
 This patch addresses permission issues with the OpenResty container in Coolify environments.
@@ -11,6 +22,7 @@ This patch addresses permission issues with the OpenResty container in Coolify e
    - Updated the permissions of nginx configuration directories to be writable
    - Added a fallback mechanism in the entrypoint script to use a temporary configuration file
    - Ensured the application can run without root privileges in restricted environments
+   - Added CORS_ALLOW_ORIGIN environment variable with default value to fix nginx config errors
 
 2. **Port Conflict Resolution**
    - Changed all exposed ports to non-default values to avoid conflicts:
