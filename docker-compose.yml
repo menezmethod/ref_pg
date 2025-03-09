@@ -82,7 +82,9 @@ services:
       - shortener-net
 
   openresty:
-    image: openresty/openresty:alpine
+    build:
+      context: ./docker/openresty
+      dockerfile: Dockerfile
     container_name: url_shortener_redirect
     restart: always
     depends_on:
@@ -94,13 +96,6 @@ services:
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-*}
     ports:
       - "8001:80"
-    volumes:
-      - ./nginx.conf.coolify:/usr/local/openresty/nginx/conf/nginx.conf:ro
-    command: >
-      sh -c "
-        echo 'Starting OpenResty with custom configuration...' &&
-        /usr/local/openresty/bin/openresty -g 'daemon off;'
-      "
     networks:
       - shortener-net
 
