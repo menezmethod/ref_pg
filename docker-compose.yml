@@ -19,7 +19,7 @@ services:
       - db
     volumes:
       - ./migrations:/migrations
-    command: >
+    command: |
       bash -c "
         echo 'Waiting for PostgreSQL...' &&
         sleep 10 &&
@@ -46,76 +46,85 @@ services:
             );
           ' &&
           echo 'Creating URL shortener functions...' &&
-          echo \"
-            CREATE OR REPLACE FUNCTION api.create_short_link(p_original_url TEXT, p_custom_alias TEXT DEFAULT NULL)
-            RETURNS JSON AS \$\$
-            DECLARE
-              v_url_id INTEGER;
-              v_code TEXT;
-            BEGIN
-              INSERT INTO api.urls (original_url) VALUES (p_original_url) RETURNING id INTO v_url_id;
-              v_code := COALESCE(p_custom_alias, 'url' || v_url_id::TEXT);
-              INSERT INTO api.short_links (url_id, code) VALUES (v_url_id, v_code);
-              RETURN json_build_object(
-                'success', TRUE,
-                'code', v_code,
-                'short_url', 'https://ref.menezmethod.com/r/' || v_code,
-                'original_url', p_original_url
-              );
-            END;
-            \$\$ LANGUAGE plpgsql SECURITY DEFINER;
+          cat > /tmp/create_short_link.sql << 'EOSQL'
+          CREATE OR REPLACE FUNCTION api.create_short_link(p_original_url TEXT, p_custom_alias TEXT DEFAULT NULL)
+          RETURNS JSON AS $$
+          DECLARE
+            v_url_id INTEGER;
+            v_code TEXT;
+          BEGIN
+            INSERT INTO api.urls (original_url) VALUES (p_original_url) RETURNING id INTO v_url_id;
+            v_code := COALESCE(p_custom_alias, 'url' || v_url_id::TEXT);
+            INSERT INTO api.short_links (url_id, code) VALUES (v_url_id, v_code);
+            RETURN json_build_object(
+              'success', TRUE,
+              'code', v_code,
+              'short_url', 'https://ref.menezmethod.com/r/' || v_code,
+              'original_url', p_original_url
+            );
+          END;
+          $$ LANGUAGE plpgsql SECURITY DEFINER;
+          EOSQL
 
-            CREATE OR REPLACE FUNCTION api.get_original_url(p_code TEXT)
-            RETURNS JSON AS \$\$
-            DECLARE
-              v_original_url TEXT;
-            BEGIN
-              SELECT u.original_url INTO v_original_url
-              FROM api.short_links s
-              JOIN api.urls u ON s.url_id = u.id
-              WHERE s.code = p_code;
-              
-              IF v_original_url IS NULL THEN
-                RETURN json_build_object(
-                  'success', FALSE,
-                  'error', 'Short URL not found'
-                );
-              END IF;
-              
+          cat > /tmp/get_original_url.sql << 'EOSQL'
+          CREATE OR REPLACE FUNCTION api.get_original_url(p_code TEXT)
+          RETURNS JSON AS $$
+          DECLARE
+            v_original_url TEXT;
+          BEGIN
+            SELECT u.original_url INTO v_original_url
+            FROM api.short_links s
+            JOIN api.urls u ON s.url_id = u.id
+            WHERE s.code = p_code;
+            
+            IF v_original_url IS NULL THEN
               RETURN json_build_object(
-                'success', TRUE,
-                'original_url', v_original_url
+                'success', FALSE,
+                'error', 'Short URL not found'
               );
-            END;
-            \$\$ LANGUAGE plpgsql SECURITY DEFINER;
+            END IF;
+            
+            RETURN json_build_object(
+              'success', TRUE,
+              'original_url', v_original_url
+            );
+          END;
+          $$ LANGUAGE plpgsql SECURITY DEFINER;
+          EOSQL
 
-            CREATE OR REPLACE FUNCTION api.quick_link(url TEXT, alias TEXT, api_key TEXT DEFAULT NULL)
-            RETURNS JSON AS \$\$
-            BEGIN
-              RETURN api.create_short_link(url, alias);
-            END;
-            \$\$ LANGUAGE plpgsql SECURITY DEFINER;
-          \" > /tmp/functions.sql &&
-          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /tmp/functions.sql
+          cat > /tmp/quick_link.sql << 'EOSQL'
+          CREATE OR REPLACE FUNCTION api.quick_link(url TEXT, alias TEXT, api_key TEXT DEFAULT NULL)
+          RETURNS JSON AS $$
+          BEGIN
+            RETURN api.create_short_link(url, alias);
+          END;
+          $$ LANGUAGE plpgsql SECURITY DEFINER;
+          EOSQL
+
+          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /tmp/create_short_link.sql &&
+          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /tmp/get_original_url.sql &&
+          PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /tmp/quick_link.sql
         fi &&
         echo 'Ensuring roles are set correctly...' &&
-        echo \"
-          DO \$\$
-          BEGIN
-            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'anon') THEN
-              CREATE ROLE anon NOLOGIN;
-            END IF;
-            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'authenticator') THEN
-              DROP ROLE IF EXISTS authenticator;
-              CREATE ROLE authenticator WITH LOGIN PASSWORD '$POSTGRES_PASSWORD' NOINHERIT;
-              GRANT anon TO authenticator;
-            END IF;
-            GRANT USAGE ON SCHEMA api TO anon;
-            GRANT USAGE ON SCHEMA api TO authenticator;
-            GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA api TO anon;
-          END;
-          \$\$;
-        \" > /tmp/roles.sql &&
+        cat > /tmp/roles.sql << 'EOSQL'
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'anon') THEN
+            CREATE ROLE anon NOLOGIN;
+          END IF;
+          IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'authenticator') THEN
+            DROP ROLE IF EXISTS authenticator;
+            CREATE ROLE authenticator WITH LOGIN PASSWORD '$$POSTGRES_PASSWORD' NOINHERIT;
+            GRANT anon TO authenticator;
+          END IF;
+          GRANT USAGE ON SCHEMA api TO anon;
+          GRANT USAGE ON SCHEMA api TO authenticator;
+          GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA api TO anon;
+        END;
+        $$;
+        EOSQL
+
+        sed -i \"s/\\$\\$POSTGRES_PASSWORD/$$POSTGRES_PASSWORD/g\" /tmp/roles.sql &&
         PGPASSWORD=$$POSTGRES_PASSWORD psql -h db -U $$POSTGRES_USER -d $$POSTGRES_DB -f /tmp/roles.sql &&
         echo 'Database initialization completed.'
       "
@@ -143,7 +152,7 @@ services:
       - "3333:3000"
     networks:
       - shortener-net
-    command: >
+    command: |
       sh -c "
         echo 'Waiting for database to be ready...' &&
         sleep 15 &&
@@ -163,62 +172,9 @@ services:
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-*}
     ports:
       - "8001:80"
-    command: >
-      sh -c '
-        echo "Creating simplified nginx configuration..." &&
-        mkdir -p /usr/local/openresty/lua &&
-        echo "server {
-            listen 80;
-            server_name localhost;
-
-            # Health check endpoint
-            location /health {
-                access_log off;
-                add_header Content-Type text/plain;
-                return 200 \"OK\";
-            }
-
-            # Home page
-            location = / {
-                default_type text/html;
-                return 200 \"<!DOCTYPE html><html><head><title>URL Shortener</title></head><body><h1>URL Shortener Service</h1><p>Use the API to create and manage short links.</p></body></html>\";
-            }
-
-            # API passthrough to PostgREST
-            location /api/ {
-                rewrite ^/api/(.*) /\$1 break;
-                proxy_pass http://postgrest:3000/;
-                proxy_set_header Host \$host;
-                proxy_set_header X-Real-IP \$remote_addr;
-                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-            }
-
-            # Direct access to RPC functions
-            location ~ ^/api/rpc/([a-zA-Z_]+)$ {
-                set \$func_name \$1;
-                proxy_pass http://postgrest:3000/rpc/\$func_name;
-                proxy_set_header Content-Type application/json;
-            }
-
-            # URL shortener redirect
-            location ~ ^/r/([a-zA-Z0-9]+)$ {
-                set \$code \$1;
-                proxy_pass http://postgrest:3000/rpc/get_original_url?p_code=\$code;
-                proxy_set_header Content-Type application/json;
-                
-                # Handle the response with a simple header filter
-                add_header Content-Type application/json;
-            }
-
-            # Error page
-            error_page 500 502 503 504 /50x.html;
-            location = /50x.html {
-                root /usr/local/openresty/nginx/html;
-            }
-        }" > /etc/nginx/conf.d/default.conf &&
-        echo "Starting OpenResty with simplified configuration..." &&
-        exec /usr/local/openresty/bin/openresty -g "daemon off;"
-      '
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    command: /usr/local/openresty/bin/openresty -g "daemon off;"
     networks:
       - shortener-net
 
