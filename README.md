@@ -43,11 +43,6 @@ The service is built with the following components:
    docker-compose up -d
    ```
 
-3. Retrieve your master admin API key:
-   ```bash
-   docker exec url_shortener_db psql -U postgres -d url_shortener -c "SELECT key FROM api_keys WHERE name = 'Master Admin Key'"
-   ```
-
 ## Quick Start for Coolify
 
 ### 1. Set Required Environment Variables
@@ -70,29 +65,136 @@ For production deployments, always enable HTTPS in Coolify to prevent sensitive 
 
 With these security settings in place, your URL shortener is ready to use in production.
 
-## API Usage
+## Authentication Flow
 
-### Super Simple Method (RECOMMENDED FOR COOLIFY)
+The URL shortener supports a simple authentication flow designed for easy integration with external applications:
 
-Create a short link with a single API call:
+### 1. Master Password → API Key Flow
+
+The main authentication flow is:
+
+1. **Set master password** in environment variables (done once during setup)
+2. **Get API key** using the master password 
+3. **Use the API key** in your applications to create short links
+
+This approach allows you to:
+- Have a single master password that's easy to remember
+- Generate an API key that applications can use
+- Revoke/change API keys without changing your master password
+
+### 2. Getting an API Key
 
 ```bash
-curl -X POST "https://your-coolify-domain/rpc/quick_link" \
+# Get API key using master password
+curl -X POST "https://your-domain/rpc/get_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{"p_password": "your-master-password"}'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "api_key": "042af4f146b96858888537f87414eeab246e3432ee958e79"
+}
+```
+
+### 3. Using the API Key
+
+Once you have the API key, your applications can use it for authentication:
+
+```bash
+curl -X POST "https://your-domain/rpc/create_short_link" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{"p_original_url": "https://example.com/test"}'
+```
+
+## API Usage
+
+### Creating Short Links
+
+#### Method 1: Quick Link (Simplest)
+
+This method accepts a password directly and returns just the short code:
+
+```bash
+curl -X POST "https://your-domain/rpc/quick_link" \
   -H "Content-Type: application/json" \
   -d '{
     "p_url": "https://example.com/your-long-url",
     "p_password": "your-master-password",
-    "p_code": "optional-custom-code"
+    "p_code": "optional-custom-code"  // Omit to auto-generate a code
   }'
 ```
 
-This returns just the short code. Access your short link at:
+Returns: `"generated-or-custom-code"`
+
+> **Note**: The `p_code` parameter is optional. If omitted, a random short code will be automatically generated.
+
+#### Method 2: Create Short Link (with API Key)
+
+This method uses an API key for authentication and returns detailed information:
+
+```bash
+curl -X POST "https://your-domain/rpc/create_short_link" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "p_original_url": "https://example.com/long-url",
+    "p_custom_alias": "optional-custom-code",  // Omit to auto-generate
+    "p_expires_at": "2023-12-31T23:59:59Z",    // Optional expiration
+    "p_metadata": {"campaign": "summer-promo"} // Optional metadata
+  }'
+```
+
+Returns:
+```json
+{
+  "success": true,
+  "short_link_id": "64cd8a46-7c38-4693-829e-6687563fa6aa",
+  "url_id": "657dab71-a4f7-4389-801c-2e99e9a5a344",
+  "code": "auto-generated-or-custom-code",
+  "original_url": "https://example.com/long-url",
+  "custom_alias": "optional-custom-code",
+  "expires_at": null
+}
+```
+
+### Accessing Short Links
+
+To access a short link, simply navigate to:
 
 ```
-https://your-coolify-domain/r/{code}
+https://your-domain/r/{code}
 ```
 
-> 🔒 **Security Note**: Always use HTTPS (not HTTP) in production to prevent password interception!
+This will redirect to the original URL.
+
+## API Documentation (Swagger)
+
+The URL shortener includes comprehensive API documentation via Swagger UI:
+
+### Accessing Swagger UI
+
+```
+https://your-domain:8080/
+```
+
+The Swagger UI provides:
+- Interactive documentation for all API endpoints
+- The ability to test API calls directly from the browser
+- Sample request/response payloads
+- Authentication requirements for each endpoint
+
+### Key Endpoints in Swagger
+
+These are the main endpoints you'll use:
+
+1. `/rpc/get_api_key` - Get an API key using master password
+2. `/rpc/quick_link` - Create a short link with master password
+3. `/rpc/create_short_link` - Create a short link with API key
+4. `/rpc/change_master_password` - Change the master password
 
 ## Environment Variables
 
@@ -114,6 +216,32 @@ The service can be configured using the following environment variables:
 > - Use a secrets management solution for storing sensitive values
 > - Never commit actual production credentials to version control
 > - Use HTTPS in production to prevent credential interception
+
+## Additional Features
+
+### Auto-Generation of Short Codes
+
+If you don't specify a custom code (`p_code` or `p_custom_alias`), the system will automatically generate a random short code for you. The generated codes:
+
+- Are typically 6 characters long
+- Contain a mix of letters and numbers
+- Are guaranteed to be unique
+
+### API Key Management
+
+The system provides several endpoints for API key management:
+
+- `/rpc/generate_api_key` - Generate a new API key (admin only)
+- `/rpc/revoke_api_key` - Revoke an existing API key (admin only)
+- `/rpc/list_api_keys` - List all API keys (admin only)
+
+### Analytics
+
+Basic analytics are stored for each short link:
+
+- Click count and timestamps
+- Referrer information (where available)
+- Geographic information (if enabled)
 
 ## Production Deployment
 
