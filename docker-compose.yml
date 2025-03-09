@@ -57,12 +57,9 @@ services:
     container_name: url_shortener_api
     restart: always
     depends_on:
-      db:
-        condition: service_healthy
+      - db
     environment:
       PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-url_shortener}
-      # Fallback to regular name if Coolify name doesn't work
-      COOLIFY_DB_FALLBACK: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-url_shortener}
       PGRST_DB_SCHEMA: api
       PGRST_DB_ANON_ROLE: anon
       PGRST_JWT_SECRET: ${JWT_SECRET:-your_jwt_secret_change_me}
@@ -72,10 +69,8 @@ services:
       PGRST_MAX_ROWS: 1000
       PGRST_CORS_PREFLIGHT_CACHE_SECONDS: 3600
       PGRST_RAW_MEDIA_TYPES: application/vnd.pgrst.object+json,application/vnd.pgrst.object+octet-stream
-      # Pass these through to the entrypoint script
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
-    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     ports:
       - "3333:3000"
       - "8888:8888"
@@ -100,8 +95,7 @@ services:
     container_name: url_shortener_redirect
     restart: always
     depends_on:
-      postgrest:
-        condition: service_healthy
+      - postgrest
     environment:
       RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-60}
       RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-60}

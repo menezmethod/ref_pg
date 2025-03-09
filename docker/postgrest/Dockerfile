@@ -1,21 +1,27 @@
 FROM postgrest/postgrest:latest
 
-# Install networking tools and PostgreSQL client for diagnostics
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    netcat-openbsd \
-    iputils-ping \
-    net-tools \
-    dnsutils \
-    postgresql-client \
-    && rm -rf /var/lib/apt/lists/*
+# Check which package manager is available and install tools accordingly
+RUN if command -v apt-get >/dev/null; then \
+      apt-get update && \
+      apt-get install -y --no-install-recommends \
+        netcat-openbsd \
+        iputils-ping \
+        net-tools \
+        dnsutils \
+        postgresql-client \
+      && rm -rf /var/lib/apt/lists/*; \
+    elif command -v apk >/dev/null; then \
+      apk add --no-cache \
+        netcat-openbsd \
+        iputils \
+        net-tools \
+        bind-tools \
+        postgresql-client; \
+    fi
 
-# Copy both entrypoint scripts - use the enhanced one by default
+# Copy the entrypoint script
 COPY entrypoint.sh /entrypoint.sh
-COPY entrypoint-enhanced.sh /entrypoint-enhanced.sh
+RUN chmod +x /entrypoint.sh
 
-# Make both scripts executable
-RUN chmod +x /entrypoint.sh /entrypoint-enhanced.sh
-
-# Use the enhanced script by default 
-ENTRYPOINT ["/bin/sh", "/entrypoint-enhanced.sh"] 
+# Use the original entrypoint script for compatibility
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"] 
