@@ -178,6 +178,26 @@ parse_db_url() {
   echo "DB User: $db_user"
   echo "DB Password: [redacted]"
   
+  # Get anon role name from environment
+  if [ -n "${PGRST_DB_ANON_ROLE}" ]; then
+    echo "Found PostgREST anonymous role: ${PGRST_DB_ANON_ROLE}"
+    export DB_ANON_ROLE="${PGRST_DB_ANON_ROLE}"
+  else
+    # Default to 'anon' if not specified
+    echo "Using default anonymous role: anon"
+    export DB_ANON_ROLE="anon"
+  fi
+  
+  # Get schema from environment
+  if [ -n "${PGRST_DB_SCHEMA}" ]; then
+    echo "Found PostgREST schema: ${PGRST_DB_SCHEMA}"
+    export DB_SCHEMA="${PGRST_DB_SCHEMA}"
+  else
+    # Default to 'api' if not specified
+    echo "Using default schema: api"
+    export DB_SCHEMA="api"
+  fi
+  
   # Store alternative POSTGRES_USER/PASSWORD from environment if available
   if [ -n "${POSTGRES_USER}" ]; then
     echo "Found alternative POSTGRES_USER: ${POSTGRES_USER}"
@@ -227,19 +247,34 @@ test_alternative_credentials() {
         export DB_PASS="$DB_ALT_PASS"
         
         # Try to create the original user if we have postgres admin access
-        echo "Attempting to create missing authenticator role with admin credentials..."
+        echo "Attempting to create missing PostgREST roles with admin credentials..."
         create_role_sql="DO \$\$ 
         BEGIN
+          -- Create schema if not exists
+          CREATE SCHEMA IF NOT EXISTS ${DB_SCHEMA};
+          
+          -- Create authenticator role if not exists
           IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '$db_user') THEN
             CREATE ROLE $db_user WITH LOGIN PASSWORD '$db_pass';
-            GRANT USAGE ON SCHEMA api TO $db_user;
-            CREATE SCHEMA IF NOT EXISTS api;
-            GRANT ALL PRIVILEGES ON SCHEMA api TO $db_user;
-            GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA api TO $db_user;
-            GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA api TO $db_user;
+            GRANT USAGE ON SCHEMA ${DB_SCHEMA} TO $db_user;
+            GRANT ALL PRIVILEGES ON SCHEMA ${DB_SCHEMA} TO $db_user;
+            GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${DB_SCHEMA} TO $db_user;
+            GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${DB_SCHEMA} TO $db_user;
+          END IF;
+          
+          -- Create anon role if not exists
+          IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${DB_ANON_ROLE}') THEN
+            CREATE ROLE ${DB_ANON_ROLE} NOLOGIN;
+            GRANT USAGE ON SCHEMA ${DB_SCHEMA} TO ${DB_ANON_ROLE};
+            GRANT SELECT ON ALL TABLES IN SCHEMA ${DB_SCHEMA} TO ${DB_ANON_ROLE};
+            GRANT USAGE ON ALL SEQUENCES IN SCHEMA ${DB_SCHEMA} TO ${DB_ANON_ROLE};
+            GRANT ${DB_ANON_ROLE} TO $db_user;
           END IF;
         END
         \$\$;"
+        
+        echo "Executing SQL to create roles:"
+        echo "$create_role_sql"
         
         PGPASSWORD="$DB_ALT_PASS" psql -h "$host" -p "$port" -U "$DB_ALT_USER" -d "$DB_NAME" -c "$create_role_sql" || true
         echo "Authentication setup attempted. Continuing with available credentials."
