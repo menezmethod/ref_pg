@@ -25,26 +25,47 @@ services:
       bash -c "
         echo 'Waiting for PostgreSQL...' &&
         sleep 10 &&
-        echo 'Ensuring migration file is accessible...' &&
+        
+        # Create temp directory for migration
+        echo 'Setting up migration environment...' &&
         mkdir -p /tmp/migrations &&
+        
+        # Try to find the migration file
+        echo 'Searching for migration file...' &&
+        MIGRATION_FOUND=false &&
+        
+        # Check if it's a directory
         if [ -d '/migrations_source/000_main_migration.sql' ]; then
-          echo 'Found migration directory, searching for migration file inside...' &&
-          find /migrations_source/000_main_migration.sql -type f -name '*.sql' -exec cp {} /tmp/migrations/000_main_migration.sql \; &&
-          if [ -f '/tmp/migrations/000_main_migration.sql' ]; then
-            echo 'Found and copied migration file from directory!'
+          echo 'Found a directory instead of a file. Searching inside...' &&
+          
+          # Try to find SQL files inside
+          SQL_FILE=$(find /migrations_source/000_main_migration.sql -type f -name '*.sql' | head -1) &&
+          if [ -n "$SQL_FILE" ]; then
+            echo "Found SQL file: $SQL_FILE" &&
+            cp "$SQL_FILE" /tmp/migrations/000_main_migration.sql &&
+            MIGRATION_FOUND=true &&
+            echo 'Migration file copied successfully!'
           else
-            echo 'Could not find migration file inside directory, using fallback...' &&
-            cp /migrations_source/000_main_migration.sql/000_main_migration.sql /tmp/migrations/000_main_migration.sql 2>/dev/null || true
+            # Try a direct path as fallback
+            echo 'No SQL files found. Trying direct path...' &&
+            if [ -f '/migrations_source/000_main_migration.sql/000_main_migration.sql' ]; then
+              cp /migrations_source/000_main_migration.sql/000_main_migration.sql /tmp/migrations/000_main_migration.sql &&
+              MIGRATION_FOUND=true &&
+              echo 'Found migration file at direct path!'
+            fi
           fi
+        
+        # Check if it's a regular file
         elif [ -f '/migrations_source/000_main_migration.sql' ]; then
-          echo 'Found migration file, copying it...' &&
-          cp /migrations_source/000_main_migration.sql /tmp/migrations/000_main_migration.sql
-        else
-          echo 'Migration file not found in source location.'
+          echo 'Found migration file directly.' &&
+          cp /migrations_source/000_main_migration.sql /tmp/migrations/000_main_migration.sql &&
+          MIGRATION_FOUND=true &&
+          echo 'Migration file copied successfully!'
         fi &&
-        echo 'Running migration script...' &&
-        if [ -f '/tmp/migrations/000_main_migration.sql' ]; then
-          echo 'Found migration file, applying it...' &&
+        
+        # Apply migration if found
+        if [ "$MIGRATION_FOUND" = true ]; then
+          echo 'Applying migration...' &&
           PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -f /tmp/migrations/000_main_migration.sql &&
           echo 'Migration applied successfully!' &&
           
@@ -53,12 +74,12 @@ services:
             DO $$
             BEGIN
                 -- Ensure roles exist
-                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = \"anon\") THEN
+                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = "anon") THEN
                     CREATE ROLE anon NOLOGIN;
                 END IF;
                 
-                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = \"authenticator\") THEN
-                    CREATE ROLE authenticator WITH LOGIN PASSWORD \"'\"$POSTGRES_PASSWORD\"'\" NOINHERIT;
+                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = "authenticator") THEN
+                    CREATE ROLE authenticator WITH LOGIN PASSWORD "'"$POSTGRES_PASSWORD"'" NOINHERIT;
                     GRANT anon TO authenticator;
                 END IF;
                 
@@ -69,7 +90,8 @@ services:
                 GRANT SELECT ON ALL TABLES IN SCHEMA api TO anon;
             END
             $$;
-          '
+          ' &&
+          echo 'Permissions set up successfully!'
         else
           echo 'Migration file not found. Setting up basic schema...' &&
           PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c 'CREATE SCHEMA IF NOT EXISTS api;' &&
@@ -87,8 +109,10 @@ services:
               code TEXT NOT NULL UNIQUE,
               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
-          '
+          ' &&
+          echo 'Basic schema created.'
         fi &&
+        
         echo 'Database initialization completed.'
       "
     environment:
