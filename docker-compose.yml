@@ -7,30 +7,12 @@ services:
     restart: always
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./migrations/000_main_migration.sql:/docker-entrypoint-initdb.d/000_main_migration.sql
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
-    networks:
-      - shortener-net
-
-  init-db:
-    image: postgres:15
-    restart: "no"
-    depends_on:
-      - db
-    volumes:
-      - ./migrations:/migrations
-      - ./init-production-db.sh:/init-db.sh
-    command: >
-      bash -c "chmod +x /init-db.sh && /init-db.sh"
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
-      DB_HOST: db
-      DB_PORT: 5432
-      MASTER_PASSWORD: ${MASTER_PASSWORD:-master123}
     networks:
       - shortener-net
 
@@ -40,7 +22,6 @@ services:
     restart: always
     depends_on:
       - db
-      - init-db
     environment:
       PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-url_shortener}
       PGRST_DB_SCHEMA: api
