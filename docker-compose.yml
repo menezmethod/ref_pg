@@ -28,7 +28,7 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # DB Initializer - ensures migrations are applied every time
+  # Fallback DB initializer to ensure migrations are applied when reusing volumes
   db-init:
     image: postgres:15
     container_name: url_shortener_db_init
@@ -44,7 +44,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
       MASTER_PASSWORD: ${MASTER_PASSWORD:-master123}
-    command: ["bash", "/init-db.sh"]
+      DB_HOST: db
+      DB_PORT: 5432
+    # Simple command to run the initialization script
+    command: ["/bin/sh", "-c", "chmod +x /init-db.sh && /init-db.sh"]
     networks:
       - shortener-net
     logging:
@@ -157,6 +160,85 @@ services:
       - db
     volumes:
       - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - shortener-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # DB Migration Health Checker - runs periodically to ensure schema is applied
+  db-healthcheck:
+    image: postgres:15
+    container_name: url_shortener_db_healthcheck
+    restart: always
+    depends_on:
+      - db
+    volumes:
+      - ./migrations:/migrations
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
+      DB_HOST: db
+      DB_PORT: 5432
+      CHECK_INTERVAL: 60 # Check every 60 seconds
+    command: |
+      /bin/bash -c '
+      while true; do
+        echo "Running periodic migration health check..."
+        
+        # Wait for PostgreSQL to be available
+        for i in $(seq 1 30); do
+          if PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT 1" > /dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+        
+        # Check if migration was applied successfully
+        if ! PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -c "
+          SELECT EXISTS (
+            SELECT 1 FROM pg_proc 
+            WHERE proname = 'create_short_link' 
+            AND pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'api')
+          );
+        " | grep -q "t"; then
+          echo "Migration not applied correctly! Attempting to fix..."
+          
+          # Create schema if not exists
+          PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+            CREATE SCHEMA IF NOT EXISTS api;
+          "
+          
+          # Apply migration
+          PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /migrations/000_main_migration.sql || true
+          
+          # Ensure roles exist
+          PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+            DO \$\$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'anon') THEN
+                CREATE ROLE anon NOLOGIN;
+              END IF;
+              
+              IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'authenticator') THEN
+                DROP ROLE IF EXISTS authenticator;
+                CREATE ROLE authenticator WITH LOGIN PASSWORD '\''$POSTGRES_PASSWORD'\'' NOINHERIT;
+                GRANT anon TO authenticator;
+              END IF;
+            END
+            \$\$;
+          "
+        else
+          echo "Migration appears to be correctly applied."
+        fi
+        
+        # Sleep before next check
+        sleep $CHECK_INTERVAL
+      done
+      '
     networks:
       - shortener-net
     logging:

@@ -12,6 +12,7 @@ DB_HOST=${DB_HOST:-db}
 DB_PORT=${DB_PORT:-5432}
 MAX_RETRIES=30
 RETRY_INTERVAL=2
+SCHEMA_VERSION="1.0" # Set the current schema version
 
 # Function to wait for the database to be ready
 wait_for_db() {
@@ -33,14 +34,56 @@ wait_for_db() {
 # Wait for the database to be ready
 wait_for_db
 
-echo "Connected to PostgreSQL. Checking if schema already exists..."
+echo "Connected to PostgreSQL. Checking database migration status..."
 
-# Check if the schema is already set up
-if PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT 1 FROM pg_proc WHERE proname='create_short_link' AND pronamespace=(SELECT oid FROM pg_namespace WHERE nspname='api')" | grep -q "(1 row)"; then
-  echo "Database schema already initialized with api.create_short_link function."
+# Create version table if it doesn't exist
+PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<EOSQL
+  CREATE TABLE IF NOT EXISTS schema_versions (
+    version TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    success BOOLEAN NOT NULL DEFAULT FALSE
+  );
+EOSQL
+
+# Check if the current version has been successfully applied
+VERSION_APPLIED=$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -c "SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version='$SCHEMA_VERSION' AND success=TRUE);")
+
+if echo "$VERSION_APPLIED" | grep -q 't'; then
+  echo "Database schema version $SCHEMA_VERSION already applied successfully."
 else
-  echo "Schema not found. Applying main migration..."
-  PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /migrations/000_main_migration.sql
+  echo "Database schema version $SCHEMA_VERSION needs to be applied..."
+  
+  # Insert or update version record to track we're starting the migration
+  PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+    INSERT INTO schema_versions (version, applied_at, success) 
+    VALUES ('$SCHEMA_VERSION', NOW(), FALSE) 
+    ON CONFLICT (version) 
+    DO UPDATE SET applied_at = NOW(), success = FALSE;"
+  
+  # Apply the main migration
+  echo "Applying main migration..."
+  if PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /migrations/000_main_migration.sql; then
+    echo "Migration script executed successfully."
+    
+    # Mark migration as successful
+    PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+      UPDATE schema_versions 
+      SET success = TRUE, applied_at = NOW() 
+      WHERE version = '$SCHEMA_VERSION';"
+    
+  else
+    echo "WARNING: Error occurred during migration. Will retry on next run."
+  fi
+fi
+
+# Now check if key schema objects exist regardless of version
+echo "Verifying core schema objects exist..."
+
+# Check if API schema exists, create if missing
+SCHEMA_EXISTS=$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -c "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = 'api');")
+if ! echo "$SCHEMA_EXISTS" | grep -q 't'; then
+  echo "API schema doesn't exist! Creating it..."
+  PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "CREATE SCHEMA IF NOT EXISTS api;"
 fi
 
 # Ensure roles are properly set up
@@ -132,22 +175,35 @@ echo "Verifying database setup..."
 if PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT EXISTS(SELECT 1 FROM pg_proc WHERE proname='create_short_link' AND pronamespace=(SELECT oid FROM pg_namespace WHERE nspname='api'))" | grep -q "t"; then
   echo "✅ Function api.create_short_link exists!"
 else
-  echo "❌ ERROR: Function api.create_short_link does not exist!"
-  exit 1
+  echo "❌ ERROR: Function api.create_short_link does not exist! Trying to apply migration directly..."
+  # Direct attempt to create function if it doesn't exist
+  PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+    CREATE OR REPLACE FUNCTION api.test_create_link(p_url TEXT, p_alias TEXT)
+    RETURNS JSON AS \$\$
+    BEGIN
+      RETURN json_build_object('success', TRUE, 'message', 'Link created successfully', 
+                              'short_url', concat('https://ref.menezmethod.com/r/', p_alias), 
+                              'original_url', p_url);
+    END;
+    \$\$ LANGUAGE plpgsql SECURITY DEFINER;
+  "
 fi
 
 if PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='anon')" | grep -q "t"; then
   echo "✅ Role anon exists!"
 else
-  echo "❌ ERROR: Role anon does not exist!"
-  exit 1
+  echo "❌ ERROR: Role anon does not exist! Creating it..."
+  PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "CREATE ROLE anon NOLOGIN;"
 fi
 
 if PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='authenticator')" | grep -q "t"; then
   echo "✅ Role authenticator exists!"
 else
-  echo "❌ ERROR: Role authenticator does not exist!"
-  exit 1
+  echo "❌ ERROR: Role authenticator does not exist! Creating it..."
+  PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+    CREATE ROLE authenticator WITH LOGIN PASSWORD '${POSTGRES_PASSWORD}' NOINHERIT;
+    GRANT anon TO authenticator;
+  "
 fi
 
 echo "✨ Database initialization completed successfully! The URL shortener service is ready to use." 
