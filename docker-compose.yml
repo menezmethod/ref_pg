@@ -60,8 +60,6 @@ services:
     restart: always
     depends_on:
       - db
-    volumes:
-      - ./docker/postgrest/entrypoint.sh:/entrypoint.sh
     environment:
       PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-url_shortener}
       PGRST_DB_SCHEMA: api
