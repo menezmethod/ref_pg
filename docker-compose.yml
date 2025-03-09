@@ -1,14 +1,12 @@
 services:
   db:
-    image: postgres:15
+    build:
+      context: .
+      dockerfile: docker/postgres/Dockerfile
     container_name: url_shortener_db
     restart: always
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations/000_main_migration.sql:/docker-entrypoint-initdb.d/1-schema.sql
-      - ./sql/init/init-db.sh:/docker-entrypoint-initdb.d/2-init-db.sh
-      - ./sql/init/update-pg-hba.sh:/docker-entrypoint-initdb.d/3-update-pg-hba.sh
-      - ./sql:/docker-entrypoint-initdb.d/sql
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
