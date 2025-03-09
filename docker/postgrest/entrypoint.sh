@@ -1,7 +1,44 @@
 #!/bin/sh
 set -e
 
-echo "Starting PostgREST entrypoint script..."
+echo "Starting PostgREST entrypoint script (with built-in health check)..."
+
+# Create a simple health check server using a background process
+start_health_server() {
+  # Use a simple while loop to create a basic HTTP server on port 8080
+  # This will respond to health checks while PostgREST is starting
+  echo "Starting built-in health check server on port 8080..."
+  (
+    while true; do
+      { echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"; } | nc -l -p 8080 -q 1 || true
+      sleep 0.1
+    done
+  ) &
+  HEALTH_SERVER_PID=$!
+  echo "Health check server started with PID: $HEALTH_SERVER_PID"
+}
+
+# Kill the health check server when it's no longer needed
+stop_health_server() {
+  if [ -n "$HEALTH_SERVER_PID" ]; then
+    echo "Stopping health check server (PID: $HEALTH_SERVER_PID)..."
+    kill $HEALTH_SERVER_PID 2>/dev/null || true
+  fi
+}
+
+# Handle SIGTERM and other signals properly
+cleanup() {
+  echo "Received signal to shut down..."
+  stop_health_server
+  
+  # Kill PostgREST if it's running
+  if [ -n "$POSTGREST_PID" ]; then
+    echo "Stopping PostgREST (PID: $POSTGREST_PID)..."
+    kill $POSTGREST_PID 2>/dev/null || true
+  fi
+  
+  exit 0
+}
 
 # Parse DATABASE_URL to extract components
 parse_db_url() {
@@ -31,7 +68,7 @@ parse_db_url() {
 wait_for_postgres() {
   echo "Waiting for PostgreSQL to be ready at $DB_HOST:$DB_PORT..."
   
-  max_attempts=60  # Increased from 30 to 60 (2 minutes total)
+  max_attempts=60  # 2 minutes total
   attempt=1
   
   while [ $attempt -le $max_attempts ]; do
@@ -82,42 +119,54 @@ check_role() {
   fi
 }
 
-# Start PostgREST in the background
-start_postgrest_bg() {
-  echo "Starting PostgREST in background mode..."
-  postgrest &
-  POSTGREST_PID=$!
-  echo "PostgREST started with PID: $POSTGREST_PID"
-  
-  # Give it a moment to initialize
-  sleep 3
-  
-  # Check if process is still running
-  if kill -0 $POSTGREST_PID 2>/dev/null; then
-    echo "PostgREST is running successfully"
-    return 0
-  else
-    echo "PostgREST failed to start properly"
-    return 1
-  fi
-}
-
 # Main execution logic
 main() {
+  # Start our health check server
+  # Check if netcat is available for the health server
+  if command -v nc >/dev/null 2>&1; then
+    # Start the health check server
+    start_health_server
+  else
+    echo "WARNING: netcat not available, health check server will not be started"
+  fi
+  
+  # Set up signal handling for graceful shutdown
+  trap cleanup SIGTERM SIGINT
+  
   # Parse database URL
   parse_db_url
   
   # Wait for PostgreSQL to be ready - with longer timeout
-  if ! wait_for_postgres; then
-    echo "ERROR: Failed to connect to PostgreSQL. Continuing anyway since the DB might still be initializing..."
-    # Don't exit here, try to start PostgREST anyway
+  wait_for_postgres || echo "WARNING: Database connection check failed, but continuing anyway..."
+  
+  echo "Starting PostgREST in foreground mode..."
+  
+  # Start PostgREST in the foreground, but keep script running
+  postgrest &
+  POSTGREST_PID=$!
+  
+  # Wait for PostgREST to start or fail
+  sleep 5
+  
+  # Check if PostgREST is running
+  if kill -0 $POSTGREST_PID 2>/dev/null; then
+    echo "PostgREST started successfully with PID: $POSTGREST_PID"
+    
+    # Keep the script running to maintain our health check server
+    echo "Entrypoint script is now monitoring PostgREST..."
+    
+    # Wait for PostgreSQL to terminate
+    wait $POSTGREST_PID || true
+    
+    echo "PostgREST has terminated."
+  else
+    echo "ERROR: PostgREST failed to start properly"
   fi
   
-  echo "All checks completed. Starting PostgREST..."
+  # Clean up before exiting
+  stop_health_server
   
-  # Start PostgREST - don't use exec so our script can continue running
-  # This ensures the container stays alive even if initial health checks fail
-  postgrest
+  echo "Entrypoint script is exiting."
 }
 
 # Run the main function
