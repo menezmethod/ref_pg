@@ -54,6 +54,9 @@ In Coolify, set the following environment variables:
 | ✅ | `MASTER_PASSWORD` | A strong, unique password (min 12 chars, mix of letters, numbers, symbols) |
 | ✅ | `POSTGRES_PASSWORD` | A strong, unique database password |
 | ✅ | `JWT_SECRET` | A random string (32+ characters) |
+| ✅ | `PGADMIN_EMAIL` | Your email for pgAdmin access |
+| ✅ | `PGADMIN_PASSWORD` | A strong password for pgAdmin |
+| ✅ | `REDIS_PASSWORD` | A strong password for Redis |
 
 > 🔒 **Security Note**: These credentials are critical for your application's security. Use Coolify's environment variable encryption feature if available.
 
@@ -61,7 +64,22 @@ In Coolify, set the following environment variables:
 
 For production deployments, always enable HTTPS in Coolify to prevent sensitive data (including your master password) from being transmitted in plaintext.
 
-### 3. That's it!
+### 3. Important Configuration Notes
+
+- **PostgreSQL port**: This project uses port 5433 for external PostgreSQL connections to avoid conflicts with other PostgreSQL instances. Update your connection strings accordingly.
+- **Custom PostgreSQL configuration**: The default PostgreSQL configuration is used to avoid errors. If you need custom configurations, add them to the Coolify settings.
+- **pgAdmin access**: For information on how to use pgAdmin with this project, see the [pgAdmin Guide](./pgadmin-guide.md).
+- **Prometheus**: The Prometheus service has been removed to simplify deployment, but metrics endpoints are still available.
+
+### 4. Troubleshooting Coolify Deployment
+
+If you encounter issues with your Coolify deployment:
+
+- **PostgreSQL configuration errors**: Check that your volume mounts are correct and the PostgreSQL configuration files exist and are formatted properly
+- **Port conflicts**: If you see errors about ports already being in use, modify the exposed ports in your configuration
+- **Connection issues**: Ensure network connectivity between services using the service names defined in your configuration
+
+### 5. That's it!
 
 With these security settings in place, your URL shortener is ready to use in production.
 

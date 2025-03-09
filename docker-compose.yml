@@ -6,11 +6,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations/000_main_migration.sql:/docker-entrypoint-initdb.d/000_main_migration.sql
-      - ./docker/postgres/postgresql.conf:/etc/postgresql/postgresql.conf
-      - ./docker/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf
       - ./docker/postgres/init-password.sh:/docker-entrypoint-initdb.d/init-password.sh
       - ./scripts/test_db.sql:/tmp/test_db.sql
-    command: postgres -c config_file=/etc/postgresql/postgresql.conf -c hba_file=/etc/postgresql/pg_hba.conf
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -149,30 +146,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: url_shortener_prometheus
-    volumes:
-      - ./monitoring/prometheus:/etc/prometheus
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
-    ports:
-      - "9090:9090"
-    networks:
-      - shortener-net
-    depends_on:
-      - db
-    restart: always
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
 networks:
   shortener-net:
     driver: bridge
@@ -180,5 +153,4 @@ networks:
 volumes:
   postgres_data:
   pgadmin_data:
-  redis_data:
-  prometheus_data: 
+  redis_data: 

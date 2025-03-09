@@ -28,9 +28,6 @@ fi
 psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<-EOSQL
   -- Make the password accessible to SQL functions
   ALTER DATABASE $POSTGRES_DB SET app.master_password TO '$MASTER_PASSWORD';
-  
-  -- Apply our new migration if it exists
-  \i /docker-entrypoint-initdb.d/005_env_password.sql
 EOSQL
 
 echo "Master password set successfully!"
