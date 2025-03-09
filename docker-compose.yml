@@ -1,8 +1,6 @@
 services:
   db:
-    build:
-      context: .
-      dockerfile: docker/postgres/Dockerfile
+    image: postgres:15
     container_name: url_shortener_db
     restart: always
     volumes:
@@ -11,53 +9,56 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
-      JWT_SECRET: ${JWT_SECRET:-your_jwt_secret_change_me}
-      MASTER_PASSWORD: ${MASTER_PASSWORD:-master123}
-    ports:
-      - "5433:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
     networks:
       - shortener-net
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
 
-  redis:
-    image: redis:alpine
-    container_name: url_shortener_redis
-    restart: always
-    ports:
-      - "6380:6379"
+  init-db:
+    image: postgres:15
+    restart: "no"
+    depends_on:
+      - db
     volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - ./migrations:/migrations
+    command: >
+      bash -c "
+        echo 'Waiting for PostgreSQL...' &&
+        sleep 10 &&
+        echo 'Running migration script...' &&
+        PGPASSWORD=$${POSTGRES_PASSWORD} psql -h db -U $${POSTGRES_USER} -d $${POSTGRES_DB} -f /migrations/000_main_migration.sql &&
+        echo 'Migration completed.' &&
+        echo 'Ensuring roles are set correctly...' &&
+        PGPASSWORD=$${POSTGRES_PASSWORD} psql -h db -U $${POSTGRES_USER} -d $${POSTGRES_DB} -c '
+          DO $$$$
+          BEGIN
+            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '\"'anon'\"') THEN
+              CREATE ROLE anon NOLOGIN;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '\"'authenticator'\"') THEN
+              DROP ROLE IF EXISTS authenticator;
+              CREATE ROLE authenticator WITH LOGIN PASSWORD '\"'$${POSTGRES_PASSWORD}'\"' NOINHERIT;
+              GRANT anon TO authenticator;
+            END IF;
+            GRANT USAGE ON SCHEMA api TO anon;
+            GRANT USAGE ON SCHEMA api TO authenticator;
+          END
+          $$$$;
+        ' &&
+        echo 'Database initialization completed.'
+      "
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
     networks:
       - shortener-net
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
 
   postgrest:
-    build:
-      context: ./docker/postgrest
-      dockerfile: Dockerfile
+    image: postgrest/postgrest:latest
     container_name: url_shortener_api
     restart: always
     depends_on:
       - db
+      - init-db
     environment:
       PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-url_shortener}
       PGRST_DB_SCHEMA: api
@@ -68,22 +69,15 @@ services:
       - "3333:3000"
     networks:
       - shortener-net
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3000/ -m 5 || exit 0"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
+    command: >
+      sh -c "
+        echo 'Waiting for database to be ready...' &&
+        sleep 15 &&
+        postgrest
+      "
 
   openresty:
-    build:
-      context: ./docker/openresty
-      dockerfile: Dockerfile
+    image: openresty/openresty:alpine
     container_name: url_shortener_redirect
     restart: always
     depends_on:
@@ -96,47 +90,14 @@ services:
     ports:
       - "8001:80"
     volumes:
-      - ./logs/openresty:/var/log/nginx
+      - ./docker/openresty/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      - ./docker/openresty/lua:/usr/local/openresty/lua:ro
     networks:
       - shortener-net
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:80/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: url_shortener_pgadmin
-    restart: always
-    environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
-    ports:
-      - "5051:80"
-    depends_on:
-      - db
-    volumes:
-      - pgadmin_data:/var/lib/pgadmin
-    networks:
-      - shortener-net
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
 
 networks:
   shortener-net:
     driver: bridge
 
 volumes:
-  postgres_data:
-  pgadmin_data:
-  redis_data: 
+  postgres_data: 
