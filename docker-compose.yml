@@ -28,31 +28,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # Fallback DB initializer to ensure migrations are applied when reusing volumes
-  db-init:
-    image: postgres:15
-    container_name: url_shortener_db_init
-    restart: "no"
-    depends_on:
-      - db
-    volumes:
-      - ./migrations:/migrations
-      - ./init-production-db.sh:/init-db.sh
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-url_shortener}
-      MASTER_PASSWORD: ${MASTER_PASSWORD:-master123}
-    # Modified command with debugging and simplified approach
-    command: ["sh", "-c", "ls -la /migrations && if [ -f /migrations/000_main_migration.sql ]; then echo 'File exists, running SQL script...' && sleep 5 && PGPASSWORD=${POSTGRES_PASSWORD} psql -h db -U ${POSTGRES_USER} -d ${POSTGRES_DB} -f /migrations/000_main_migration.sql; else echo 'ERROR: Migration file is not a regular file or does not exist' && ls -la /migrations; fi"]
-    networks:
-      - shortener-net
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
   redis:
     image: redis:alpine
     container_name: url_shortener_redis
@@ -83,7 +58,6 @@ services:
     restart: always
     depends_on:
       - db
-      - db-init
     environment:
       PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-url_shortener}
       PGRST_DB_SCHEMA: api
@@ -100,7 +74,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8888/ -m 5 || exit 0"]
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/ -m 5 || exit 0"]
       interval: 30s
       timeout: 10s
       retries: 10

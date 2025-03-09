@@ -245,3 +245,145 @@ fi
 EOF
 
 RUN chmod +x /docker-entrypoint-initdb.d/6-emergency-fallback.sh 
+
+# Simply create initialization scripts directly in the Dockerfile
+# to avoid volume mounting issues in Coolify
+
+# Create schema setup script
+RUN echo '-- Create basic schema and roles\n\
+CREATE SCHEMA IF NOT EXISTS api;\n\
+\n\
+-- Create roles for API\n\
+DO $$\n\
+BEGIN\n\
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '"'"'anon'"'"') THEN\n\
+    CREATE ROLE anon NOLOGIN;\n\
+  END IF;\n\
+END\n\
+$$;\n\
+\n\
+DO $$\n\
+BEGIN\n\
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '"'"'authenticator'"'"') THEN\n\
+    DROP ROLE IF EXISTS authenticator;\n\
+    CREATE ROLE authenticator WITH LOGIN PASSWORD '"'"'${POSTGRES_PASSWORD}'"'"' NOINHERIT;\n\
+    GRANT anon TO authenticator;\n\
+  END IF;\n\
+END\n\
+$$;\n\
+\n\
+-- Grant permissions\n\
+GRANT USAGE ON SCHEMA api TO anon;\n\
+GRANT USAGE ON SCHEMA api TO authenticator;\n\
+\n\
+-- Create tables for URL shortener\n\
+CREATE TABLE IF NOT EXISTS api.urls (\n\
+  id SERIAL PRIMARY KEY,\n\
+  original_url TEXT NOT NULL,\n\
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n\
+);\n\
+\n\
+CREATE TABLE IF NOT EXISTS api.short_links (\n\
+  id SERIAL PRIMARY KEY,\n\
+  url_id INTEGER REFERENCES api.urls(id),\n\
+  code TEXT NOT NULL UNIQUE,\n\
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n\
+);\n\
+\n\
+-- Grant permissions on tables\n\
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA api TO anon;\n\
+\n\
+-- Create main functions\n\
+CREATE OR REPLACE FUNCTION api.create_short_link(p_original_url TEXT, p_custom_alias TEXT DEFAULT NULL)\n\
+RETURNS JSON AS $$\n\
+DECLARE\n\
+  v_url_id INTEGER;\n\
+  v_code TEXT;\n\
+BEGIN\n\
+  -- Insert URL\n\
+  INSERT INTO api.urls (original_url) VALUES (p_original_url) RETURNING id INTO v_url_id;\n\
+  \n\
+  -- Use custom alias or generate one\n\
+  v_code := COALESCE(p_custom_alias, '"'"'url'"'"' || v_url_id::TEXT);\n\
+  \n\
+  -- Create short link\n\
+  INSERT INTO api.short_links (url_id, code) VALUES (v_url_id, v_code);\n\
+  \n\
+  RETURN json_build_object(\n\
+    '"'"'success'"'"', TRUE,\n\
+    '"'"'code'"'"', v_code,\n\
+    '"'"'short_url'"'"', '"'"'https://ref.menezmethod.com/r/'"'"' || v_code,\n\
+    '"'"'original_url'"'"', p_original_url\n\
+  );\n\
+END;\n\
+$$ LANGUAGE plpgsql SECURITY DEFINER;\n\
+\n\
+-- Function to get the original URL for a short code\n\
+CREATE OR REPLACE FUNCTION api.get_original_url(p_code TEXT)\n\
+RETURNS JSON AS $$\n\
+DECLARE\n\
+  v_original_url TEXT;\n\
+BEGIN\n\
+  SELECT u.original_url INTO v_original_url\n\
+  FROM api.short_links s\n\
+  JOIN api.urls u ON s.url_id = u.id\n\
+  WHERE s.code = p_code;\n\
+  \n\
+  IF v_original_url IS NULL THEN\n\
+    RETURN json_build_object(\n\
+      '"'"'success'"'"', FALSE,\n\
+      '"'"'error'"'"', '"'"'Short URL not found'"'"'\n\
+    );\n\
+  END IF;\n\
+  \n\
+  RETURN json_build_object(\n\
+    '"'"'success'"'"', TRUE,\n\
+    '"'"'original_url'"'"', v_original_url\n\
+  );\n\
+END;\n\
+$$ LANGUAGE plpgsql SECURITY DEFINER;\n\
+\n\
+-- Test functions\n\
+CREATE OR REPLACE FUNCTION api.test_create_link(p_url TEXT, p_alias TEXT)\n\
+RETURNS JSON AS $$\n\
+BEGIN\n\
+  RETURN api.create_short_link(p_url, p_alias);\n\
+END;\n\
+$$ LANGUAGE plpgsql SECURITY DEFINER;\n\
+\n\
+CREATE OR REPLACE FUNCTION api.quick_link(url TEXT, alias TEXT, api_key TEXT DEFAULT NULL)\n\
+RETURNS JSON AS $$\n\
+BEGIN\n\
+  RETURN api.create_short_link(url, alias);\n\
+END;\n\
+$$ LANGUAGE plpgsql SECURITY DEFINER;' > /docker-entrypoint-initdb.d/init.sql
+
+# Simplified verification script
+RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+echo "Verifying database roles and schema..."\n\
+psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\n\
+  DO \$\$\n\
+  BEGIN\n\
+    RAISE NOTICE '"'"'Checking database setup...'"'"';\n\
+    \n\
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"'"'anon'"'"') THEN\n\
+      RAISE EXCEPTION '"'"'Role anon does not exist!'"'"';\n\
+    END IF;\n\
+    \n\
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"'"'authenticator'"'"') THEN\n\
+      RAISE EXCEPTION '"'"'Role authenticator does not exist!'"'"';\n\
+    END IF;\n\
+    \n\
+    IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = '"'"'api'"'"') THEN\n\
+      RAISE EXCEPTION '"'"'Schema api does not exist!'"'"';\n\
+    END IF;\n\
+    \n\
+    RAISE NOTICE '"'"'Database verification successful!'"'"';\n\
+  END;\n\
+  \$\$;"\n\
+echo "✅ Verification completed successfully"' > /docker-entrypoint-initdb.d/verify.sh
+
+# Make verification script executable
+RUN chmod +x /docker-entrypoint-initdb.d/verify.sh 
