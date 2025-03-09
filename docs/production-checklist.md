@@ -14,6 +14,7 @@ This checklist outlines the steps needed to make our PostgreSQL URL Shortener pr
   - [ ] Configure TLS/SSL for all public endpoints
   - [x] Set up proper CORS policies
   - [x] Implement rate limiting for API endpoints (60 req/min with burst capability)
+  - [x] Implement API key authentication for secure access
 
 - [x] **Database Resilience**
   - [x] Configure database persistence using Docker volumes
@@ -57,7 +58,7 @@ This checklist outlines the steps needed to make our PostgreSQL URL Shortener pr
   - [ ] Create periodic reporting
 
 - [ ] **Advanced Features**
-  - [ ] Implement user management
+  - [x] Implement API key management for cross-platform access
   - [ ] Add link expiration functionality
   - [ ] Create bulk operations for URL creation
 
@@ -70,22 +71,41 @@ This checklist outlines the steps needed to make our PostgreSQL URL Shortener pr
 
 After each change, we'll test the application using the following curl commands:
 
-1. Test the API endpoint for creating short links:
+1. Test the API endpoint for creating short links (using X-API-Key header):
 ```bash
 curl -X POST "http://localhost:3001/rpc/create_short_link" \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
   -d '{"p_original_url": "https://example.com/test"}'
 ```
 
-2. Test URL redirection functionality:
+2. Alternative method for creating short links (passing API key in body):
+```bash
+curl -X POST "http://localhost:3001/rpc/create_short_link" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "p_original_url": "https://example.com/test",
+    "p_api_key": "your-api-key"
+  }'
+```
+
+3. Test URL redirection functionality:
 ```bash
 curl -v "http://localhost:8000/r/{code}"
 ```
 
-3. Test the health of services:
+4. Test the health of services:
 ```bash
 curl -v "http://localhost:8000/health"
 curl -v "http://localhost:3001/"
+```
+
+5. Test API key generation (admin only):
+```bash
+curl -X POST "http://localhost:3001/rpc/generate_api_key" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-admin-key" \
+  -d '{"p_name": "My Application"}'
 ```
 
 All tests should be performed before and after each change to ensure we're not breaking existing functionality. 
@@ -100,4 +120,5 @@ All tests should be performed before and after each change to ensure we're not b
 - [x] Implemented Redis caching for URL redirection (1-hour TTL) to improve performance
 - [x] Added optimized database indexes for better query performance
 - [x] Created automated database backup script with rotation
-- [x] Created comprehensive Coolify deployment guide with troubleshooting tips 
+- [x] Created comprehensive Coolify deployment guide with troubleshooting tips
+- [x] Implemented API key authentication for secure cross-platform access 

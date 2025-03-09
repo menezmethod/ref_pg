@@ -1,26 +1,30 @@
-# PostgreSQL URL Shortener Service
+# PostgreSQL URL Shortener
 
-A production-ready URL shortening service built using PostgreSQL as the primary technology.
-
-## Overview
-
-This URL shortener service is designed to be a simple, yet powerful solution for creating and managing short links. Unlike traditional URL shorteners that often require complex microservices, this implementation leverages PostgreSQL's advanced features to create a more maintainable system with fewer dependencies.
+A production-ready URL shortening service built on PostgreSQL with API key authentication. This project demonstrates how to build a robust URL shortening service using PostgreSQL's powerful features for both data storage and business logic.
 
 ## Features
 
-- **PostgreSQL-First Architecture**: PostgreSQL handles all business logic, data storage, and even some API handling
-- **Short Link Generation**: Create short, memorable links for any URL
-- **Custom Aliases**: Support for vanity URLs (custom short links)
-- **Link Expiration**: Set expiration dates for short links
-- **Click Tracking**: Comprehensive analytics on link usage
-- **Redis Caching**: High-performance caching for fast redirects
-- **Full-Text Search**: Search through your URLs and metadata
-- **Prometheus Metrics**: Monitor system performance 
-- **JWT Authentication**: Secure API access
-- **Swagger UI**: Interactive API documentation
-- **Docker Deployment**: Production-ready containerization
+- **URL Shortening**: Generate short codes for long URLs
+- **API Key Authentication**: Secure your API with key-based authentication
+- **Custom Aliases**: Optionally specify a custom short code
+- **URL Expiration**: Set expiration dates for links
+- **Click Tracking**: Track click events on short links
+- **Caching**: Redis-based caching for high-performance redirects
+- **Rate Limiting**: Protect against abuse with configurable rate limits
+- **Horizontal Scalability**: Designed for containerized environments
+- **Production-Ready**: Includes monitoring, health checks, and security features
 
-## Getting Started
+## Architecture
+
+The service is built with the following components:
+
+- **PostgreSQL**: Core database for storing URLs, short codes, analytics, and API keys
+- **PostgREST**: Auto-generated REST API for database access
+- **OpenResty**: High-performance Nginx with Lua for URL redirection
+- **Redis**: Caching layer for frequently accessed URLs
+- **Docker**: Containerization for easy deployment
+
+## Quick Start
 
 ### Prerequisites
 
@@ -30,184 +34,134 @@ This URL shortener service is designed to be a simple, yet powerful solution for
 ### Installation
 
 1. Clone the repository:
-```bash
-git clone https://github.com/menezmethod/ref_pg.git
-cd ref_pg
-```
+   ```bash
+   git clone https://github.com/yourusername/url-shortener.git
+   cd url-shortener
+   ```
 
-2. Create a `.env` file in the root directory with the following variables (or use the defaults):
-```
-# Database Configuration
-POSTGRES_PASSWORD=secure_password_here
-POSTGRES_USER=postgres
-POSTGRES_DB=url_shortener
+2. Start the services:
+   ```bash
+   docker-compose up -d
+   ```
 
-# JWT Authentication
-JWT_SECRET=secure_random_string_for_jwt_token_signing
+3. Retrieve your master admin API key:
+   ```bash
+   docker exec url_shortener_db psql -U postgres -d url_shortener -c "SELECT key FROM api_keys WHERE name = 'Master Admin Key'"
+   ```
 
-# PgAdmin Configuration
-PGADMIN_EMAIL=your_email@example.com
-PGADMIN_PASSWORD=secure_pgadmin_password
+## API Usage
 
-# Redis Configuration
-REDIS_PASSWORD=secure_redis_password
+### Authentication
 
-# Environment
-ENVIRONMENT=development
-```
+The API supports two methods for API key authentication:
 
-3. Start the services:
-```bash
-docker-compose up -d
-```
+1. **Using the X-API-Key header**:
+   ```bash
+   curl -X POST "http://localhost:3001/rpc/create_short_link" \
+     -H "Content-Type: application/json" \
+     -H "X-API-Key: your-api-key" \
+     -d '{"p_original_url": "https://example.com/test"}'
+   ```
 
-4. Access the services:
-- API: http://localhost:3001
-- Short URLs: http://localhost:8000/r/{code}
-- PgAdmin: http://localhost:5050
-- Swagger UI: http://localhost:8080
-- Prometheus: http://localhost:9090
-
-## Architecture Overview
-
-The URL shortener service consists of several components:
-
-1. **PostgreSQL**: Stores URLs, short links, and analytics data. Also provides business logic through stored procedures.
-2. **PostgREST**: Auto-generates a RESTful API based on your PostgreSQL schema. 
-3. **OpenResty**: Handles URL redirections with LuaJIT scripting for flexibility.
-4. **Redis**: Provides high-speed caching for frequently accessed URLs.
-5. **Prometheus & Grafana**: Monitoring and visualization.
-6. **PgAdmin**: Database administration.
-7. **Swagger UI**: API documentation and testing.
-
-## How It Works
-
-1. When a user submits a URL to be shortened, it's stored in the PostgreSQL database.
-2. A unique code is generated (either random or custom-provided).
-3. When a user visits a short URL (e.g., `http://localhost:8000/r/abcde`):
-   - OpenResty receives the request
-   - It calls the PostgREST API to retrieve the original URL
-   - If found, it redirects the user to the original URL
-   - Analytics data is recorded in PostgreSQL
-
-## Using Swagger UI
-
-The Swagger UI provides an interactive interface to explore and test the API:
-
-1. Open http://localhost:8080 in your browser
-2. You'll see all available endpoints for the URL shortener service
-3. To create a short link:
-   - Find the `/rpc/create_short_link` endpoint and click on it
-   - Click "Try it out"
-   - Enter a JSON payload with your original URL and optional custom alias:
-     ```json
-     {
-       "p_original_url": "https://example.com/very/long/url",
-       "p_custom_alias": "mylink"
-     }
-     ```
-   - Click "Execute"
-   - The response will contain your short link code
-
-4. To test other endpoints, such as retrieving statistics or tracking clicks, follow the same process with the appropriate endpoint.
-
-## API Endpoints
-
-The API automatically generates RESTful endpoints based on the database schema:
-
-### URL Shortening
-
-- `POST /rpc/create_short_link` - Create a new short link with payload:
-  ```json
-  {
-    "p_original_url": "https://example.com/very/long/url",
-    "p_custom_alias": "mylink",
-    "p_expires_at": "2023-12-31T23:59:59Z"
-  }
-  ```
-- `GET /rpc/get_original_url` - Get the original URL for a code (used internally by OpenResty)
-- `GET /urls` - List all URLs
-- `GET /short_links` - List all short links
-
-### Analytics
-
-- `GET /link_clicks` - View all clicks
-- `POST /rpc/track_link_click` - Track a click event for a short link
-
-### User Management
-
-- `GET /users` - List all users (for admin purposes)
-- `POST /users` - Create a new user
-
-## Usage Examples
+2. **Including the API key in the request body**:
+   ```bash
+   curl -X POST "http://localhost:3001/rpc/create_short_link" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "p_original_url": "https://example.com/test",
+       "p_api_key": "your-api-key"
+     }'
+   ```
 
 ### Creating a Short Link
 
 ```bash
 curl -X POST "http://localhost:3001/rpc/create_short_link" \
   -H "Content-Type: application/json" \
-  -d '{"p_original_url": "https://example.com/very/long/url", "p_custom_alias": "example"}'
-```
-
-Response:
-```json
-{
-  "code": "example"
-}
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "p_original_url": "https://example.com/some-long-url",
+    "p_custom_alias": "my-custom-code",  # Optional
+    "p_expires_at": "2023-12-31T23:59:59Z",  # Optional
+    "p_metadata": {"campaign": "summer_promo"}  # Optional
+  }'
 ```
 
 ### Accessing a Short Link
 
-Simply visit in your browser:
 ```
-http://localhost:8000/r/example
-```
-
-This will redirect you to the original URL and track the click.
-
-## Troubleshooting
-
-### Common Issues
-
-1. **500 Internal Server Error on redirect**: 
-   - Check if the PostgREST service is running: `docker ps | grep postgrest`
-   - Verify the redirect code exists in the database
-   - Check OpenResty logs: `docker logs url_shortener_redirect`
-
-2. **OpenResty fails to start**:
-   - Check for syntax errors in nginx.conf
-   - Verify that all required Lua modules are installed
-   - Check logs for detailed error messages
-
-3. **PostgREST API not accessible**:
-   - Ensure PostgreSQL is running and healthy
-   - Check if the database migrations have been applied
-   - Verify network connectivity between containers
-
-## Project Structure
-
-```
-/
-├── docker/                 # Docker setup
-│   ├── postgres/           # Postgres configuration
-│   │   ├── postgresql.conf # PostgreSQL configuration
-│   │   └── pg_hba.conf     # Host-based authentication config
-│   ├── openresty/          # OpenResty configuration
-│   │   ├── nginx.conf      # Main NGINX configuration
-│   │   ├── Dockerfile      # OpenResty Docker build
-│   │   └── lua/            # Lua scripts for OpenResty
-│   └── postgrest/          # PostgREST configuration
-├── migrations/             # SQL migrations for database setup
-├── monitoring/             # Monitoring configuration
-│   └── prometheus/         # Prometheus configuration
-├── docker-compose.yml      # Main compose file
-└── README.md               # This file
+http://localhost:8000/r/{code}
 ```
 
-## Contributing
+### API Key Management
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+#### Generate a new API key (admin only)
+
+```bash
+curl -X POST "http://localhost:3001/rpc/generate_api_key" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-admin-key" \
+  -d '{"p_name": "My Application", "p_is_admin": false}'
+```
+
+#### Revoke an API key (admin only)
+
+```bash
+curl -X POST "http://localhost:3001/rpc/revoke_api_key" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-admin-key" \
+  -d '{"p_key": "api-key-to-revoke"}'
+```
+
+#### List all API keys (admin only)
+
+```bash
+curl -X POST "http://localhost:3001/rpc/list_api_keys" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-admin-key"
+```
+
+## Environment Variables
+
+The service can be configured using the following environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| POSTGRES_PASSWORD | PostgreSQL database password | postgres |
+| POSTGRES_USER | PostgreSQL database user | postgres |
+| POSTGRES_DB | PostgreSQL database name | url_shortener |
+| JWT_SECRET | Secret for JWT authentication | your_jwt_secret_change_me |
+| REDIS_PASSWORD | Password for Redis | (empty) |
+| RATE_LIMIT_REQUESTS | Number of requests allowed per minute | 60 |
+| CORS_ALLOW_ORIGIN | CORS allowed origins | * |
+
+## Production Deployment
+
+For production deployment, refer to the [Production Checklist](docs/production-checklist.md).
+
+## Development
+
+### Directory Structure
+
+```
+.
+├── docker/                  # Docker configuration files
+│   ├── openresty/           # OpenResty configuration
+│   ├── postgres/            # PostgreSQL configuration
+│   └── postgrest/           # PostgREST configuration
+├── migrations/              # Database migration scripts
+├── monitoring/              # Monitoring configuration
+├── scripts/                 # Utility scripts
+└── docker-compose.yml       # Docker Compose configuration
+```
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgements
+
+- [PostgreSQL](https://postgresql.org/)
+- [PostgREST](https://postgrest.org/)
+- [OpenResty](https://openresty.org/)
+- [Redis](https://redis.io/) 
