@@ -26,7 +26,7 @@ stop_health_server() {
   fi
 }
 
-# Handle SIGTERM and other signals properly
+# Handle signals properly for clean shutdown
 cleanup() {
   echo "Received signal to shut down..."
   stop_health_server
@@ -130,8 +130,10 @@ main() {
     echo "WARNING: netcat not available, health check server will not be started"
   fi
   
-  # Set up signal handling for graceful shutdown
-  trap cleanup SIGTERM SIGINT
+  # Set up basic signal handling - using numbers because some shells don't support names
+  # SIGTERM = 15, SIGINT = 2
+  trap cleanup 15
+  trap cleanup 2
   
   # Parse database URL
   parse_db_url
