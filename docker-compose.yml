@@ -20,16 +20,32 @@ services:
     depends_on:
       - db
     volumes:
-      - ./migrations:/migrations
+      - ./migrations:/migrations_source
     command: >
       bash -c "
         echo 'Waiting for PostgreSQL...' &&
         sleep 10 &&
+        echo 'Ensuring migration file is accessible...' &&
+        mkdir -p /tmp/migrations &&
+        if [ -d '/migrations_source/000_main_migration.sql' ]; then
+          echo 'Found migration directory, searching for migration file inside...' &&
+          find /migrations_source/000_main_migration.sql -type f -name '*.sql' -exec cp {} /tmp/migrations/000_main_migration.sql \; &&
+          if [ -f '/tmp/migrations/000_main_migration.sql' ]; then
+            echo 'Found and copied migration file from directory!'
+          else
+            echo 'Could not find migration file inside directory, using fallback...' &&
+            cp /migrations_source/000_main_migration.sql/000_main_migration.sql /tmp/migrations/000_main_migration.sql 2>/dev/null || true
+          fi
+        elif [ -f '/migrations_source/000_main_migration.sql' ]; then
+          echo 'Found migration file, copying it...' &&
+          cp /migrations_source/000_main_migration.sql /tmp/migrations/000_main_migration.sql
+        else
+          echo 'Migration file not found in source location.'
+        fi &&
         echo 'Running migration script...' &&
-        ls -la /migrations &&
-        if [ -f /migrations/000_main_migration.sql ]; then
+        if [ -f '/tmp/migrations/000_main_migration.sql' ]; then
           echo 'Found migration file, applying it...' &&
-          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -f /migrations/000_main_migration.sql &&
+          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -f /tmp/migrations/000_main_migration.sql &&
           echo 'Migration applied successfully!' &&
           
           echo 'Setting up permissions...' &&
