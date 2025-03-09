@@ -10,6 +10,18 @@ This guide provides instructions on how to access and use pgAdmin to manage the 
    - **Email**: `luisgimenezdev@gmail.com` (or the value of PGADMIN_EMAIL environment variable)
    - **Password**: The value of PGADMIN_PASSWORD environment variable
 
+## Service Access Information
+
+| Service | Internal Port | External Port | URL |
+|---------|--------------|--------------|-----|
+| PostgreSQL | 5432 | 5433 | N/A (Database connection) |
+| pgAdmin | 80 | 5050 | http://localhost:5050 |
+| PostgREST API | 3000 | 3001 | http://localhost:3001 |
+| URL Shortener | 80 | 8001 | http://localhost:8001/r/{code} |
+| Swagger UI | 8080 | 8080 | http://localhost:8080 |
+
+**Note**: The URL Shortener service uses port 8001 (changed from 8000) to avoid conflicts with other services in Coolify environments.
+
 ## Connecting to the URL Shortener Database
 
 1. After logging in, right-click on "Servers" in the left sidebar and select "Create" > "Server..."

@@ -1,27 +1,31 @@
 # Patch Notes - URL Shortener Coolify Deployment Fixes
 
-## Version 1.1.1 - 2025-03-09
+## Version 1.1.2 - 2025-03-09
 
-This patch specifically addresses deployment issues in Coolify environments. The changes focus on simplicity and reliability by eliminating complex configuration options in favor of a more direct approach.
+This patch specifically addresses port conflict issues when deploying in Coolify environments, along with other reliability improvements.
 
 ### Bug Fixes for Coolify
 
-1. **PostgREST Configuration Fix**
+1. **Port Conflict Resolution**
+   - Changed OpenResty port from 8000 to 8001 to avoid conflicts with other services
+   - Updated documentation to reflect the new port mapping
+
+2. **PostgREST Configuration Fix**
    - Replaced mounted config file with direct environment variables
    - Added custom entrypoint script to ensure database connection
    - Simplified container dependencies
 
-2. **PostgreSQL Initialization Enhancements**
+3. **PostgreSQL Initialization Enhancements**
    - Improved initialization script with better error handling
    - Added automatic retry mechanisms
    - Ensured database creation is reliable in Coolify containers
 
-3. **Container Dependencies Simplified**
+4. **Container Dependencies Simplified**
    - Removed health-check based dependencies which can be problematic in Coolify
    - Simplified service ordering to avoid circular dependencies
    - Improved individual container health checks
 
-4. **Coolify-Specific Optimizations**
+5. **Coolify-Specific Optimizations**
    - Made the solution work without relying on Coolify's support for volume mounts
    - Ensured containers start in the right order without complex dependencies
 
@@ -50,6 +54,6 @@ Ensure these variables are correctly set in your Coolify environment:
 
 - PostgreSQL is accessible on port 5433 (external) and 5432 (internal)
 - PostgREST API is available on port 3001
-- URL Shortener redirect service is on port 8000
+- URL Shortener redirect service is on port 8001 (changed from 8000)
 - Swagger UI is on port 8080
 - pgAdmin is on port 5050 

@@ -67,6 +67,7 @@ For production deployments, always enable HTTPS in Coolify to prevent sensitive 
 ### 3. Important Configuration Notes
 
 - **PostgreSQL port**: This project uses port 5433 for external PostgreSQL connections to avoid conflicts with other PostgreSQL instances. Update your connection strings accordingly.
+- **OpenResty port**: The URL shortener redirect service runs on port 8001 instead of the standard port 8000 to avoid conflicts with other services in Coolify.
 - **Custom PostgreSQL configuration**: The default PostgreSQL configuration is used to avoid errors. If you need custom configurations, add them to the Coolify settings.
 - **pgAdmin access**: For information on how to use pgAdmin with this project, see the [pgAdmin Guide](./pgadmin-guide.md).
 - **Prometheus**: The Prometheus service has been removed to simplify deployment, but metrics endpoints are still available.
