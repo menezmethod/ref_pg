@@ -1,8 +1,6 @@
 FROM postgrest/postgrest:latest
 
-USER root
-
-# Install netcat and network diagnostic tools
+# Install networking tools and PostgreSQL client for diagnostics
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     netcat-openbsd \
@@ -10,21 +8,14 @@ RUN apt-get update && \
     net-tools \
     dnsutils \
     postgresql-client \
-    iproute2 \
-    traceroute \
-    curl \
-    telnet \
-    tcpdump \
-    procps \
-    lsof && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy the entrypoint script
+# Copy both entrypoint scripts - use the enhanced one by default
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY entrypoint-enhanced.sh /entrypoint-enhanced.sh
 
-# Change back to the default postgrest user
-USER 1000
+# Make both scripts executable
+RUN chmod +x /entrypoint.sh /entrypoint-enhanced.sh
 
-ENTRYPOINT ["/bin/sh", "/entrypoint.sh"] 
+# Use the enhanced script by default 
+ENTRYPOINT ["/bin/sh", "/entrypoint-enhanced.sh"] 

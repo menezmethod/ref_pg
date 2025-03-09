@@ -57,9 +57,10 @@ services:
     container_name: url_shortener_api
     restart: always
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     environment:
-      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db-gwg0scggsk0o8swcgogg04wc:5432/${POSTGRES_DB:-url_shortener}
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-url_shortener}
       # Fallback to regular name if Coolify name doesn't work
       COOLIFY_DB_FALLBACK: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-url_shortener}
       PGRST_DB_SCHEMA: api
@@ -99,11 +100,13 @@ services:
     container_name: url_shortener_redirect
     restart: always
     depends_on:
-      - postgrest
+      postgrest:
+        condition: service_healthy
     environment:
       RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-60}
       RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-60}
       LOG_LEVEL: debug
+      CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-*}
     ports:
       - "8001:80"
     volumes:
