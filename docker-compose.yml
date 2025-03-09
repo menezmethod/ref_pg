@@ -26,7 +26,28 @@ services:
         echo 'Waiting for PostgreSQL...' &&
         sleep 10 &&
         echo 'Running migration script...' &&
-        PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -f /migrations/000_main_migration.sql &&
+        ls -la /migrations &&
+        if [ -f /migrations/000_main_migration.sql ]; then
+          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -f /migrations/000_main_migration.sql
+        else
+          echo 'Migration file not found. Setting up basic schema...' &&
+          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c 'CREATE SCHEMA IF NOT EXISTS api;' &&
+          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c '
+            CREATE TABLE IF NOT EXISTS api.urls (
+              id SERIAL PRIMARY KEY,
+              original_url TEXT NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+          ' &&
+          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c '
+            CREATE TABLE IF NOT EXISTS api.short_links (
+              id SERIAL PRIMARY KEY,
+              url_id INTEGER REFERENCES api.urls(id),
+              code TEXT NOT NULL UNIQUE,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+          '
+        fi &&
         echo 'Database initialization completed.'
       "
     environment:
@@ -74,14 +95,10 @@ services:
     ports:
       - "8001:80"
     volumes:
-      - ./nginx.conf.coolify:/tmp/nginx.conf:ro
+      - ./nginx.conf.coolify:/usr/local/openresty/nginx/conf/nginx.conf:ro
     command: >
       sh -c "
-        if [ -d /etc/nginx/conf.d/default.conf ]; then
-          rm -rf /etc/nginx/conf.d/default.conf;
-        fi &&
-        mkdir -p /etc/nginx/conf.d &&
-        cp /tmp/nginx.conf /etc/nginx/conf.d/default.conf &&
+        echo 'Starting OpenResty with custom configuration...' &&
         /usr/local/openresty/bin/openresty -g 'daemon off;'
       "
     networks:
