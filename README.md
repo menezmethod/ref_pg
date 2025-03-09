@@ -73,10 +73,10 @@ The URL shortener uses a simple API key authentication system. Here's how it wor
 
 1. **Set a master password** as an environment variable (done once during setup)
 2. **Get the API key** using this master password (done once at application startup)
-3. **Use only the API key** for all operations (creating short links, etc.)
+3. **Use the API key in all your API calls** (passed in the request body)
 
-> ⚠️ **Important**: The master password should ONLY be used to get the API key. 
-> All actual operations should be performed using the API key, not the password directly.
+> 🔒 **Security Best Practice**: While passing API keys in HTTP headers is standard practice in many APIs, 
+> our implementation requires passing the API key in the request body due to technical constraints.
 
 ### Getting the API Key
 
@@ -99,28 +99,30 @@ Response:
 
 ### Using the API Key
 
-Once you have the API key, store it securely and use it for all operations:
+Once you have the API key, store it securely and use it in your requests:
 
 ```bash
-# This is the proper way to use the service
+# The correct way to use the API key in this implementation
 curl -X POST "https://your-domain/rpc/create_short_link" \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your-api-key" \
-  -d '{"p_original_url": "https://example.com/test"}'
+  -d '{
+    "p_original_url": "https://example.com/test",
+    "p_api_key": "your-api-key"
+  }'
 ```
 
 ## API Usage
 
-### Creating Short Links (With API Key - RECOMMENDED)
+### Creating Short Links (With API Key)
 
 This is the recommended method for all production use:
 
 ```bash
 curl -X POST "https://your-domain/rpc/create_short_link" \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your-api-key" \
   -d '{
     "p_original_url": "https://example.com/long-url",
+    "p_api_key": "your-api-key",
     "p_custom_alias": "optional-custom-code",  // Omit to auto-generate
     "p_expires_at": "2023-12-31T23:59:59Z",    // Optional expiration
     "p_metadata": {"campaign": "summer-promo"} // Optional metadata
