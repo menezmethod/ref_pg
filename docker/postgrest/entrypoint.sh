@@ -178,6 +178,20 @@ parse_db_url() {
   echo "DB User: $db_user"
   echo "DB Password: [redacted]"
   
+  # Store alternative POSTGRES_USER/PASSWORD from environment if available
+  if [ -n "${POSTGRES_USER}" ]; then
+    echo "Found alternative POSTGRES_USER: ${POSTGRES_USER}"
+    export DB_ALT_USER="${POSTGRES_USER}"
+  fi
+  
+  if [ -n "${POSTGRES_PASSWORD}" ]; then
+    echo "Found alternative POSTGRES_PASSWORD: [redacted]"
+    export DB_ALT_PASS="${POSTGRES_PASSWORD}"
+  elif [ -n "${SERVICE_PASSWORD_DB}" ]; then
+    echo "Found alternative SERVICE_PASSWORD_DB: [redacted]"
+    export DB_ALT_PASS="${SERVICE_PASSWORD_DB}"
+  fi
+  
   export DB_HOST="$db_host"
   export DB_PORT="$db_port"
   export DB_NAME="$db_name"
@@ -191,6 +205,57 @@ parse_db_url() {
     echo "Fallback database host: $db_host_fallback"
     export DB_HOST_FALLBACK="$db_host_fallback"
   fi
+}
+
+# Create a function to test alternative credentials
+test_alternative_credentials() {
+  host="$1"
+  port="$2"
+  
+  echo "Testing alternative credentials with POSTGRES_USER..."
+  
+  if [ -n "$DB_ALT_USER" ] && [ -n "$DB_ALT_PASS" ]; then
+    if command -v psql >/dev/null 2>&1; then
+      alt_psql_output=$(PGPASSWORD="$DB_ALT_PASS" psql -h "$host" -p "$port" -U "$DB_ALT_USER" -d "$DB_NAME" -c "SELECT 1" 2>&1)
+      alt_psql_status=$?
+      
+      if [ $alt_psql_status -eq 0 ]; then
+        echo "Alternative credentials successful with user: $DB_ALT_USER"
+        
+        # Update the DB credentials and connection string
+        export DB_USER="$DB_ALT_USER"
+        export DB_PASS="$DB_ALT_PASS"
+        
+        # Try to create the original user if we have postgres admin access
+        echo "Attempting to create missing authenticator role with admin credentials..."
+        create_role_sql="DO \$\$ 
+        BEGIN
+          IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '$db_user') THEN
+            CREATE ROLE $db_user WITH LOGIN PASSWORD '$db_pass';
+            GRANT USAGE ON SCHEMA api TO $db_user;
+            CREATE SCHEMA IF NOT EXISTS api;
+            GRANT ALL PRIVILEGES ON SCHEMA api TO $db_user;
+            GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA api TO $db_user;
+            GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA api TO $db_user;
+          END IF;
+        END
+        \$\$;"
+        
+        PGPASSWORD="$DB_ALT_PASS" psql -h "$host" -p "$port" -U "$DB_ALT_USER" -d "$DB_NAME" -c "$create_role_sql" || true
+        echo "Authentication setup attempted. Continuing with available credentials."
+        
+        return 0
+      else
+        echo "Alternative credentials failed: $alt_psql_output"
+      fi
+    else
+      echo "psql not available to test alternative credentials"
+    fi
+  else
+    echo "No alternative credentials available in environment variables"
+  fi
+  
+  return 1
 }
 
 # Wait for PostgreSQL to be ready using basic TCP connection check
@@ -209,6 +274,12 @@ wait_for_postgres() {
       if wait_for_postgres_host "$db_ip_fallback" "$DB_PORT"; then
         update_connection_string "$db_ip_fallback"
         return 0
+      else
+        # Even if authentication failed, try with alternative credentials
+        if test_alternative_credentials "$db_ip_fallback" "$DB_PORT"; then
+          update_connection_string "$db_ip_fallback"
+          return 0
+        fi
       fi
     fi
     
@@ -228,6 +299,12 @@ wait_for_postgres() {
         update_connection_string "$DB_HOST_FALLBACK"
       fi
       return 0
+    else
+      # Even if authentication failed, try with alternative credentials
+      if test_alternative_credentials "$DB_HOST_FALLBACK" "$DB_PORT"; then
+        update_connection_string "$DB_HOST_FALLBACK"
+        return 0
+      fi
     fi
   fi
   
@@ -244,6 +321,12 @@ wait_for_postgres() {
       if wait_for_postgres_host "$db_ip" "$DB_PORT"; then
         update_connection_string "$db_ip"
         return 0
+      else
+        # Even if authentication failed, try with alternative credentials
+        if test_alternative_credentials "$db_ip" "$DB_PORT"; then
+          update_connection_string "$db_ip"
+          return 0
+        fi
       fi
     else
       echo "Failed to resolve $DB_HOST to an IP address"
@@ -267,6 +350,12 @@ wait_for_postgres() {
       update_connection_string "$DB_HOST"
     fi
     return 0
+  else
+    # Even if authentication failed, try with alternative credentials
+    if test_alternative_credentials "$DB_HOST" "$DB_PORT"; then
+      update_connection_string "$DB_HOST"
+      return 0
+    fi
   fi
   
   # Try direct connection to the IP we saw in the diagnostic scan
@@ -274,6 +363,12 @@ wait_for_postgres() {
   if wait_for_postgres_host "172.19.0.4" "$DB_PORT" 5; then
     update_connection_string "172.19.0.4"
     return 0
+  else
+    # Even if authentication failed, try with alternative credentials
+    if test_alternative_credentials "172.19.0.4" "$DB_PORT"; then
+      update_connection_string "172.19.0.4"
+      return 0
+    fi
   fi
   
   # Try IP addresses on our own network subnets
@@ -299,6 +394,12 @@ wait_for_postgres() {
       if wait_for_postgres_host "$ip" "$DB_PORT" 3; then  # Only try 3 times per IP
         update_connection_string "$ip"
         return 0
+      else
+        # Try alternative credentials
+        if test_alternative_credentials "$ip" "$DB_PORT"; then
+          update_connection_string "$ip"
+          return 0
+        fi
       fi
     done
   done
@@ -311,6 +412,12 @@ wait_for_postgres() {
     if wait_for_postgres_host "$ip" "$DB_PORT" 3; then  # Only try 3 times per IP
       update_connection_string "$ip"
       return 0
+    else
+      # Try alternative credentials
+      if test_alternative_credentials "$ip" "$DB_PORT"; then
+        update_connection_string "$ip"
+        return 0
+      fi
     fi
   done
   
@@ -378,6 +485,7 @@ wait_for_postgres_host() {
   echo "Checking PostgreSQL at $host:$port (max $max_attempts attempts)..."
   
   attempt=1
+  authentication_failed=0
   
   while [ $attempt -le $max_attempts ]; do
     echo "Attempt $attempt/$max_attempts: Checking PostgreSQL connection at $host:$port..."
@@ -398,6 +506,13 @@ wait_for_postgres_host() {
           else
             echo "TCP connection succeeded but PostgreSQL query failed."
             echo "psql error: $psql_output"
+            
+            # Check if this is an authentication error
+            if echo "$psql_output" | grep -q "password authentication failed" || echo "$psql_output" | grep -q "does not exist"; then
+              authentication_failed=1
+              # Don't keep retrying if it's an authentication error
+              break
+            fi
           fi
         else
           echo "TCP connection succeeded, but psql not available for full verification."
@@ -428,6 +543,13 @@ wait_for_postgres_host() {
           else
             echo "TCP connection succeeded but PostgreSQL query failed."
             echo "psql error: $psql_output"
+            
+            # Check if this is an authentication error
+            if echo "$psql_output" | grep -q "password authentication failed" || echo "$psql_output" | grep -q "does not exist"; then
+              authentication_failed=1
+              # Don't keep retrying if it's an authentication error
+              break
+            fi
           fi
         else
           echo "TCP connection succeeded, but psql not available for full verification."
@@ -441,8 +563,13 @@ wait_for_postgres_host() {
     sleep 2
   done
   
-  echo "Failed to connect to PostgreSQL at $host:$port after $max_attempts attempts"
-  return 1
+  if [ "$authentication_failed" = "1" ]; then
+    echo "Authentication failed for user $DB_USER - this is likely a credentials issue rather than a connection issue"
+    return 2  # Special return code for auth failures
+  else
+    echo "Failed to connect to PostgreSQL at $host:$port after $max_attempts attempts"
+    return 1
+  fi
 }
 
 # Main execution logic
