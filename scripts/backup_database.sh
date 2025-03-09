@@ -1,45 +1,47 @@
 #!/bin/bash
+# PostgreSQL URL Shortener Database Backup Script
+# This script creates compressed backups of the PostgreSQL database and rotates old backups
 
-# Database Backup Script for Churnistic Referral Service
-# Usage: ./backup_database.sh [backup_dir]
+# Configuration
+BACKUP_DIR="/path/to/backups"  # Change this to your backup directory
+CONTAINER_NAME="url_shortener_db"
+DB_NAME="url_shortener"
+DB_USER="postgres"
+BACKUP_RETENTION_DAYS=7
+DATE_FORMAT="%Y-%m-%d_%H-%M-%S"
+CURRENT_DATE=$(date +"$DATE_FORMAT")
+BACKUP_FILENAME="${DB_NAME}_${CURRENT_DATE}.sql.gz"
 
-# Get backup directory from argument or use default
-BACKUP_DIR=${1:-"../backups"}
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-BACKUP_FILE="$BACKUP_DIR/referral_service_$TIMESTAMP.sql"
+# Ensure backup directory exists
+mkdir -p "$BACKUP_DIR"
 
-# Load environment variables if .env file exists
-if [ -f ../.env ]; then
-    source ../.env
-else
-    echo "Warning: .env file not found. Using default values."
-    POSTGRES_USER=${POSTGRES_USER:-postgres}
-    POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
-    POSTGRES_DB=${POSTGRES_DB:-referral_service}
-fi
+# Echo start
+echo "Starting backup of $DB_NAME at $(date)"
 
-# Create backup directory if it doesn't exist
-mkdir -p $BACKUP_DIR
-
-echo "Creating backup of $POSTGRES_DB database..."
-
-# Run pg_dump to create the backup
-PGPASSWORD=$POSTGRES_PASSWORD pg_dump -h localhost -U $POSTGRES_USER -d $POSTGRES_DB -F p > $BACKUP_FILE
+# Create backup 
+echo "Creating database backup..."
+docker exec "$CONTAINER_NAME" pg_dump -U "$DB_USER" -d "$DB_NAME" | gzip > "$BACKUP_DIR/$BACKUP_FILENAME"
 
 # Check if backup was successful
 if [ $? -eq 0 ]; then
-    echo "Backup completed successfully: $BACKUP_FILE"
+    echo "Database backup completed successfully: $BACKUP_FILENAME"
     
-    # Compress the backup file
-    gzip $BACKUP_FILE
-    echo "Backup compressed: $BACKUP_FILE.gz"
+    # Create a symlink to the latest backup
+    ln -sf "$BACKUP_DIR/$BACKUP_FILENAME" "$BACKUP_DIR/latest.sql.gz"
     
-    # Optional: Remove backups older than 30 days
-    find $BACKUP_DIR -name "referral_service_*.sql.gz" -type f -mtime +30 -delete
-    echo "Removed backups older than 30 days."
+    # Delete backups older than retention period
+    find "$BACKUP_DIR" -name "${DB_NAME}_*.sql.gz" -type f -mtime +$BACKUP_RETENTION_DAYS -delete
+    echo "Removed backups older than $BACKUP_RETENTION_DAYS days"
 else
-    echo "Backup failed!"
+    echo "Error: Database backup failed!"
     exit 1
 fi
 
-exit 0 
+# Show disk usage
+echo "Current backup disk usage:"
+du -sh "$BACKUP_DIR"
+
+echo "Backup process completed at $(date)"
+
+# Add this to crontab for daily backups at 2 AM:
+# 0 2 * * * /path/to/backup_database.sh >> /path/to/backup_logs/backup.log 2>&1 
