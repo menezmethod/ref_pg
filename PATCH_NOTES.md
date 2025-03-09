@@ -2,7 +2,7 @@
 
 ## Version 1.1.5 - 2025-03-09
 
-This patch addresses the CORS variable issue in the OpenResty configuration.
+This patch addresses the CORS variable issue in the OpenResty configuration and fixes PostgREST connection problems.
 
 ### Bug Fixes for Coolify
 
@@ -10,6 +10,14 @@ This patch addresses the CORS variable issue in the OpenResty configuration.
    - Added default CORS_ALLOW_ORIGIN environment variable in the entrypoint script
    - Updated envsubst command to include the CORS variable in substitution
    - Fixed the "unknown cors_allow_origin variable" error that was preventing the container from starting
+
+2. **PostgREST Connection Improvements**
+   - Enhanced the PostgREST entrypoint script with robust database connection logic
+   - Added better parsing of connection URI to extract host and port
+   - Increased timeout values and wait duration for database connections
+   - Improved error handling and logging for better diagnostics
+   - Added fallback connection attempts when initial connection fails
+   - Fixed issue with PostgREST continuously restarting in Coolify environment
 
 ## Version 1.1.4 - 2025-03-09
 
