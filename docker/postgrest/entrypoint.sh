@@ -97,7 +97,7 @@ run_diagnostics() {
   
   # Try some common Docker network IPs
   echo "COMMON DOCKER NETWORK IP SCANS:"
-  for ip in 172.17.0.2 172.17.0.3 172.18.0.2 172.18.0.3; do
+  for ip in 172.19.0.2 172.19.0.3 172.19.0.4 172.20.0.2 172.20.0.3 172.20.0.4; do
     echo "Testing connectivity to $ip:5432:"
     if command -v nc >/dev/null 2>&1; then
       nc -zv $ip 5432 -w 1 2>&1 || echo "nc command failed for $ip:5432"
@@ -111,6 +111,24 @@ run_diagnostics() {
 resolve_hostname() {
   hostname="$1"
   
+  # Skip empty hostname
+  if [ -z "$hostname" ]; then
+    echo ""
+    return 1
+  fi
+  
+  # First try netcat to see if we can connect directly - this is most reliable
+  if command -v nc >/dev/null 2>&1; then
+    if nc -zv "$hostname" 5432 -w 2 >/dev/null 2>&1; then
+      # If we can connect, try to get the IP it resolved to
+      ip_from_nc=$(nc -zv "$hostname" 5432 -w 2 2>&1 | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
+      if [ -n "$ip_from_nc" ]; then
+        echo "$ip_from_nc"
+        return 0
+      fi
+    fi
+  fi
+  
   # Try different methods to get IP address
   if command -v getent >/dev/null 2>&1; then
     ip_address=$(getent hosts "$hostname" | awk '{ print $1 }')
@@ -121,7 +139,7 @@ resolve_hostname() {
   elif command -v host >/dev/null 2>&1; then
     ip_address=$(host "$hostname" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
   else
-    echo "Cannot resolve hostname: no resolution tools available"
+    echo ""
     return 1
   fi
   
@@ -129,7 +147,7 @@ resolve_hostname() {
     echo "$ip_address"
     return 0
   else
-    echo "Failed to resolve $hostname to an IP address"
+    echo ""
     return 1
   fi
 }
@@ -179,52 +197,12 @@ parse_db_url() {
 wait_for_postgres() {
   echo "Waiting for PostgreSQL to be ready..."
   
-  # Try to resolve hostname to IP first (to work around DNS issues)
-  db_ip=""
-  if [ -n "$DB_HOST" ]; then
-    echo "Attempting to resolve $DB_HOST to an IP address..."
-    db_ip=$(resolve_hostname "$DB_HOST" 2>/dev/null) || true
-    
-    if [ -n "$db_ip" ]; then
-      echo "Resolved $DB_HOST to IP: $db_ip"
-      export DB_HOST_IP="$db_ip"
-      
-      # Try connecting to the resolved IP
-      if wait_for_postgres_host "$db_ip" "$DB_PORT"; then
-        update_connection_string "$db_ip"
-        return 0
-      fi
-    else
-      echo "Failed to resolve $DB_HOST to an IP address"
-    fi
-  fi
-  
-  # First try primary host (if IP resolution failed)
-  if [ -z "$db_ip" ]; then
-    if wait_for_postgres_host "$DB_HOST" "$DB_PORT"; then
-      # Try to get the IP that was used successfully
-      if command -v psql >/dev/null 2>&1; then
-        # Use psql to get the actual server IP
-        server_ip=$(PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT inet_server_addr();" 2>/dev/null) || true
-        if [ -n "$server_ip" ]; then
-          echo "PostgreSQL server actual IP: $server_ip (from server_addr)"
-          update_connection_string "$server_ip"
-          return 0
-        else
-          update_connection_string "$DB_HOST"
-        fi
-      else
-        update_connection_string "$DB_HOST"
-      fi
-      return 0
-    fi
-  fi
-  
-  # If that fails and we have a fallback hostname, try the fallback
+  # Try to resolve the fallback hostname first as it's likely simpler (like 'db')
   if [ -n "$DB_HOST_FALLBACK" ]; then
-    echo "Primary database host unreachable, trying fallback host: $DB_HOST_FALLBACK"
+    echo "Checking fallback hostname $DB_HOST_FALLBACK first as it's likely more reliable..."
+    
     # Try to resolve fallback hostname to IP
-    db_ip_fallback=$(resolve_hostname "$DB_HOST_FALLBACK" 2>/dev/null) || true
+    db_ip_fallback=$(resolve_hostname "$DB_HOST_FALLBACK")
     
     if [ -n "$db_ip_fallback" ]; then
       echo "Resolved fallback $DB_HOST_FALLBACK to IP: $db_ip_fallback"
@@ -253,7 +231,52 @@ wait_for_postgres() {
     fi
   fi
   
-  # Try IP addresses on our own network subnets first
+  # If fallback didn't work, try to resolve primary hostname to IP
+  if [ -n "$DB_HOST" ]; then
+    echo "Attempting to resolve $DB_HOST to an IP address..."
+    db_ip=$(resolve_hostname "$DB_HOST")
+    
+    if [ -n "$db_ip" ]; then
+      echo "Resolved $DB_HOST to IP: $db_ip"
+      export DB_HOST_IP="$db_ip"
+      
+      # Try connecting to the resolved IP
+      if wait_for_postgres_host "$db_ip" "$DB_PORT"; then
+        update_connection_string "$db_ip"
+        return 0
+      fi
+    else
+      echo "Failed to resolve $DB_HOST to an IP address"
+    fi
+  fi
+  
+  # Try primary host directly (if IP resolution failed)
+  if wait_for_postgres_host "$DB_HOST" "$DB_PORT"; then
+    # Try to get the IP that was used successfully
+    if command -v psql >/dev/null 2>&1; then
+      # Use psql to get the actual server IP
+      server_ip=$(PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT inet_server_addr();" 2>/dev/null) || true
+      if [ -n "$server_ip" ]; then
+        echo "PostgreSQL server actual IP: $server_ip (from server_addr)"
+        update_connection_string "$server_ip"
+        return 0
+      else
+        update_connection_string "$DB_HOST"
+      fi
+    else
+      update_connection_string "$DB_HOST"
+    fi
+    return 0
+  fi
+  
+  # Try direct connection to the IP we saw in the diagnostic scan
+  echo "Trying direct connection to 172.19.0.4 (from diagnostic scan)..."
+  if wait_for_postgres_host "172.19.0.4" "$DB_PORT" 5; then
+    update_connection_string "172.19.0.4"
+    return 0
+  fi
+  
+  # Try IP addresses on our own network subnets
   echo "Trying to find PostgreSQL on local network subnets..."
   my_ips=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || ifconfig | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || echo "")
   
@@ -319,6 +342,9 @@ update_connection_string() {
   export PGRST_DB_URI="postgres://${DB_USER}:${DB_PASS}@${working_host}:${DB_PORT}/${DB_NAME}"
   echo "New connection string: postgres://${DB_USER}:****@${working_host}:${DB_PORT}/${DB_NAME}"
   
+  # Also set PGHOST environment variable for PostgreSQL clients
+  export PGHOST="$working_host"
+  
   # Save to hosts file if we have permission
   if [ -w /etc/hosts ]; then
     if ! grep -q "$working_host db" /etc/hosts; then
@@ -342,6 +368,12 @@ wait_for_postgres_host() {
   host="$1"
   port="$2"
   max_attempts="${3:-60}"  # Default to 60 attempts unless specified
+  
+  # Skip empty hostnames
+  if [ -z "$host" ]; then
+    echo "Empty hostname passed to wait_for_postgres_host, skipping"
+    return 1
+  fi
   
   echo "Checking PostgreSQL at $host:$port (max $max_attempts attempts)..."
   
