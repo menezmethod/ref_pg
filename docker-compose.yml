@@ -28,7 +28,32 @@ services:
         echo 'Running migration script...' &&
         ls -la /migrations &&
         if [ -f /migrations/000_main_migration.sql ]; then
-          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -f /migrations/000_main_migration.sql
+          echo 'Found migration file, applying it...' &&
+          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -f /migrations/000_main_migration.sql &&
+          echo 'Migration applied successfully!' &&
+          
+          echo 'Setting up permissions...' &&
+          PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c '
+            DO $$
+            BEGIN
+                -- Ensure roles exist
+                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = \"anon\") THEN
+                    CREATE ROLE anon NOLOGIN;
+                END IF;
+                
+                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = \"authenticator\") THEN
+                    CREATE ROLE authenticator WITH LOGIN PASSWORD \"'\"$POSTGRES_PASSWORD\"'\" NOINHERIT;
+                    GRANT anon TO authenticator;
+                END IF;
+                
+                -- Grant permissions
+                GRANT USAGE ON SCHEMA api TO anon;
+                GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA api TO anon;
+                GRANT USAGE ON ALL SEQUENCES IN SCHEMA api TO anon;
+                GRANT SELECT ON ALL TABLES IN SCHEMA api TO anon;
+            END
+            $$;
+          '
         else
           echo 'Migration file not found. Setting up basic schema...' &&
           PGPASSWORD=$POSTGRES_PASSWORD psql -h db -U $POSTGRES_USER -d $POSTGRES_DB -c 'CREATE SCHEMA IF NOT EXISTS api;' &&
@@ -92,10 +117,10 @@ services:
     environment:
       RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-60}
       RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-60}
-      LOG_LEVEL: debug
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-*}
     ports:
-      - "8001:80"
+      - "8080:80"
     networks:
       - shortener-net
 
