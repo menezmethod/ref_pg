@@ -1,6 +1,6 @@
 #!/bin/sh
 # Failure-mode tests: cache stampede, Postgres outage, full click queue.
-# Restarts OpenResty with a 1 s cache and a 1 MB click queue, pauses PostgREST,
+# Restarts OpenResty with a 1 s cache and a 2,000-click buffer, pauses PostgREST,
 # and puts both back on exit. Run against a stack started with
 # RATE_LIMIT_REQUESTS=0:  docker compose up -d --wait && tests/resilience.sh
 set -eu
@@ -31,7 +31,7 @@ restore() {
 }
 trap restore EXIT
 
-LINK_CACHE_SECONDS=1 LINK_NEGATIVE_CACHE_SECONDS=1 CLICK_QUEUE_MB=1 docker compose up -d --wait openresty >/dev/null 2>&1
+LINK_CACHE_SECONDS=1 LINK_NEGATIVE_CACHE_SECONDS=1 CLICK_BUFFER=2000 docker compose up -d --wait openresty >/dev/null 2>&1
 sql "alter system set track_functions = 'all'" >/dev/null && sql "select pg_reload_conf()" >/dev/null
 
 KEY=$(sql "select issue_api_key('resilience-$(date +%s)', 'k')")
@@ -60,7 +60,7 @@ check_le "  fast, not after nginx's 60 s, ms"    3000 "$MS"
 
 echo "# full click queue while Postgres is unreachable"
 since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-burst 6000 "$BASE/r/$CODE"  # a 1 MB queue holds about 2,000 browser-sized clicks
+burst 6000 "$BASE/r/$CODE"  # the buffer holds 2,000 clicks, plus one batch in flight
 sleep 8  # one flush attempt times out (5 s), then drops are reported
 logs=$(docker compose logs openresty --since "$since" 2>&1)
 check "redirects kept working"                   302 "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/r/$CODE")"

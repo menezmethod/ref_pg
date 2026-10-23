@@ -35,3 +35,29 @@ jobs:
       - name: Logs on failure
         if: failure()
         run: docker compose logs --no-color
+
+  chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      COMPOSE: docker compose -f docker-compose.yml -f docker-compose.limits.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write .env
+        run: |
+          {
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
+            echo "AUTHENTICATOR_PASSWORD=$(openssl rand -hex 16)"
+            echo "RATE_LIMIT_REQUESTS=0"
+          } > .env
+
+      - name: Start the CPU- and RAM-limited stack
+        run: $COMPOSE up -d --build --wait
+
+      - name: Chaos test (stampede, scan, Postgres pause, overload, 10x data)
+        run: tests/chaos_bench.sh
+
+      - name: Logs on failure
+        if: failure()
+        run: $COMPOSE logs --no-color --tail 300

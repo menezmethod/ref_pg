@@ -61,7 +61,9 @@ CREATE TABLE links (
     code       text NOT NULL UNIQUE
                CONSTRAINT code_must_be_3_to_32_letters_or_digits CHECK (code ~ '^[A-Za-z0-9]{3,32}$'),
     url        text NOT NULL
-               CONSTRAINT url_must_be_http_or_https CHECK (url ~* '^https?://[^\s]+$' AND length(url) <= 2048),
+               CONSTRAINT url_must_be_http_or_https CHECK (url ~* '^https?://' AND length(url) <= 2048)
+               -- no spaces or control characters: OpenResty refuses to send them in Location (500)
+               CONSTRAINT url_must_not_contain_spaces_or_control_characters CHECK (url !~ '[\x01-\x20\x7f-\x9f]'),
     api_key_id bigint DEFAULT current_key() REFERENCES api_keys(id) ON DELETE SET NULL,
     is_active  boolean NOT NULL DEFAULT true,  -- set false with psql to take down an abusive link
     created_at timestamptz NOT NULL DEFAULT now()
@@ -81,12 +83,79 @@ CREATE TABLE clicks (
 CREATE INDEX clicks_link_id_clicked_at ON clicks (link_id, clicked_at);
 CREATE INDEX clicks_tenant_id ON clicks (tenant_id);
 
+-- Rollups, kept current by a trigger on clicks, so analytics cost grows with
+-- links and days, not with clicks. Raw clicks stay for ad-hoc queries.
+CREATE TABLE link_totals (
+    link_id       bigint PRIMARY KEY REFERENCES links(id) ON DELETE CASCADE,
+    tenant_id     bigint NOT NULL,
+    clicks        bigint NOT NULL,
+    last_click_at timestamptz NOT NULL
+);
+CREATE TABLE link_clicks_hourly (
+    link_id   bigint NOT NULL REFERENCES links(id) ON DELETE CASCADE,
+    tenant_id bigint NOT NULL,
+    hour      timestamptz NOT NULL,
+    clicks    bigint NOT NULL,
+    PRIMARY KEY (link_id, hour)
+);
+CREATE TABLE link_referrers_daily (
+    link_id   bigint NOT NULL REFERENCES links(id) ON DELETE CASCADE,
+    tenant_id bigint NOT NULL,
+    day       date NOT NULL,
+    referrer  text NOT NULL,  -- '(direct)' when the request had none
+    clicks    bigint NOT NULL,
+    PRIMARY KEY (link_id, day, referrer)
+);
+CREATE INDEX link_totals_tenant_id ON link_totals (tenant_id);
+CREATE INDEX link_referrers_daily_tenant_id ON link_referrers_daily (tenant_id);
+
+-- Batch ids already written by internal_record_clicks, so a retried batch
+-- (the first attempt timed out but committed) is not counted twice.
+CREATE TABLE click_batches (
+    id          text PRIMARY KEY,
+    recorded_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX click_batches_recorded_at ON click_batches (recorded_at);
+
 ALTER TABLE links  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE clicks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE link_totals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE link_clicks_hourly ENABLE ROW LEVEL SECURITY;
+ALTER TABLE link_referrers_daily ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON links
     USING (tenant_id = current_tenant()) WITH CHECK (tenant_id = current_tenant());
 CREATE POLICY tenant_isolation ON clicks
     USING (tenant_id = current_tenant()) WITH CHECK (tenant_id = current_tenant());
+CREATE POLICY tenant_isolation ON link_totals USING (tenant_id = current_tenant());
+CREATE POLICY tenant_isolation ON link_clicks_hourly USING (tenant_id = current_tenant());
+CREATE POLICY tenant_isolation ON link_referrers_daily USING (tenant_id = current_tenant());
+
+-- One statement-level trigger run per INSERT (one per click batch), whatever
+-- path inserted the rows. ORDER BY makes every batch lock rollup rows in the
+-- same order, so two concurrent flushes cannot deadlock on a hot link.
+CREATE FUNCTION roll_up_clicks() RETURNS trigger
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+BEGIN
+    INSERT INTO link_totals (link_id, tenant_id, clicks, last_click_at)
+    SELECT link_id, tenant_id, count(*), max(clicked_at) FROM new_clicks
+    GROUP BY link_id, tenant_id ORDER BY link_id
+    ON CONFLICT (link_id) DO UPDATE
+    SET clicks = link_totals.clicks + excluded.clicks,
+        last_click_at = greatest(link_totals.last_click_at, excluded.last_click_at);
+
+    INSERT INTO link_clicks_hourly (link_id, tenant_id, hour, clicks)
+    SELECT link_id, tenant_id, date_trunc('hour', clicked_at), count(*) FROM new_clicks
+    GROUP BY 1, 2, 3 ORDER BY 1, 3
+    ON CONFLICT (link_id, hour) DO UPDATE SET clicks = link_clicks_hourly.clicks + excluded.clicks;
+
+    INSERT INTO link_referrers_daily (link_id, tenant_id, day, referrer, clicks)
+    SELECT link_id, tenant_id, clicked_at::date, coalesce(referrer, '(direct)'), count(*) FROM new_clicks
+    GROUP BY 1, 2, 3, 4 ORDER BY 1, 3, 4
+    ON CONFLICT (link_id, day, referrer) DO UPDATE SET clicks = link_referrers_daily.clicks + excluded.clicks;
+    RETURN NULL;
+END $$;
+CREATE TRIGGER roll_up_clicks AFTER INSERT ON clicks
+    REFERENCING NEW TABLE AS new_clicks FOR EACH STATEMENT EXECUTE FUNCTION roll_up_clicks();
 
 -- Internal helpers (not in "api") -------------------------------------------------
 
@@ -156,15 +225,13 @@ BEGIN
     IF p_custom_alias IS NOT NULL THEN
         INSERT INTO links (code, url) VALUES (p_custom_alias, p_original_url) RETURNING code INTO v_code;
     ELSE
+        -- ON CONFLICT instead of an exception block: no subtransaction per call.
         LOOP
-            BEGIN
-                INSERT INTO links (code, url)
-                VALUES (left(translate(encode(gen_random_bytes(12), 'base64'), '+/', ''), 7), p_original_url)
-                RETURNING code INTO v_code;
-                EXIT;
-            EXCEPTION WHEN unique_violation THEN
-                -- generated code collided with an existing one; try another
-            END;
+            INSERT INTO links (code, url)
+            VALUES (left(translate(encode(gen_random_bytes(12), 'base64'), '+/', ''), 7), p_original_url)
+            ON CONFLICT (code) DO NOTHING
+            RETURNING code INTO v_code;
+            EXIT WHEN v_code IS NOT NULL;  -- NULL: the generated code was taken; try another
         END LOOP;
     END IF;
 
@@ -194,25 +261,28 @@ END $$;
 -- Read-only views. security_invoker makes RLS apply, so each tenant sees only
 -- its own rows. PostgREST serves them with filtering and ordering, e.g.
 -- GET /api/link_stats?order=clicks.desc&limit=10
+-- Both read rollups, never raw clicks. clicks_24h counts whole hours: the
+-- current hour plus the 23 before it.
 CREATE VIEW api.link_stats WITH (security_invoker = true) AS
 SELECT l.code,
        l.url,
        l.is_active,
        l.created_at,
-       count(c.id)                                                          AS clicks,
-       count(c.id) FILTER (WHERE c.clicked_at > now() - interval '24 hours') AS clicks_24h,
-       max(c.clicked_at)                                                    AS last_click_at
+       coalesce(t.clicks, 0) AS clicks,
+       coalesce((SELECT sum(h.clicks) FROM link_clicks_hourly h
+                 WHERE h.link_id = l.id AND h.hour >= date_trunc('hour', now()) - interval '23 hours'), 0)::bigint
+                             AS clicks_24h,
+       t.last_click_at
 FROM links l
-LEFT JOIN clicks c ON c.link_id = l.id
-GROUP BY l.id;
+LEFT JOIN link_totals t ON t.link_id = l.id;
 
 CREATE VIEW api.top_referrers WITH (security_invoker = true) AS
 SELECT l.code,
-       coalesce(c.referrer, '(direct)') AS referrer,
-       count(*)                         AS clicks
-FROM clicks c
-JOIN links l ON l.id = c.link_id
-GROUP BY l.code, 2;
+       r.referrer,
+       sum(r.clicks)::bigint AS clicks
+FROM link_referrers_daily r
+JOIN links l ON l.id = r.link_id
+GROUP BY l.code, r.referrer;
 
 -- Internal API (OpenResty only; nginx blocks /api/rpc/internal_*) -----------------
 
@@ -220,18 +290,46 @@ CREATE FUNCTION api.internal_lookup_link(p_code text)
 RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp
 AS $$ SELECT url FROM links WHERE code = p_code AND is_active $$;
 
+-- p_batch: unique per batch, reused when a batch is retried.
 -- p_clicks: [{"code", "ts" (unix seconds), "referrer", "user_agent", "ip"}, ...]
-CREATE FUNCTION api.internal_record_clicks(p_clicks json)
-RETURNS integer LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
-    WITH inserted AS (
-        INSERT INTO clicks (tenant_id, link_id, clicked_at, referrer, user_agent, ip)
-        SELECT l.tenant_id, l.id, to_timestamp(x.ts), left(x.referrer, 2048), left(x.user_agent, 512), anonymize_ip(x.ip)
-        FROM json_to_recordset(p_clicks) AS x(code text, ts double precision, referrer text, user_agent text, ip text)
-        JOIN links l ON l.code = x.code
-        RETURNING 1
-    )
-    SELECT count(*)::integer FROM inserted
-$$;
+-- Returns the clicks written: 0 for a batch already recorded. Clicks for codes
+-- that no longer exist are skipped.
+CREATE FUNCTION api.internal_record_clicks(p_batch text, p_clicks json)
+RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    n integer;
+BEGIN
+    INSERT INTO click_batches (id) VALUES (p_batch) ON CONFLICT DO NOTHING;
+    IF NOT FOUND THEN
+        RETURN 0;
+    END IF;
+
+    FOR attempt IN 1..3 LOOP
+        BEGIN
+            WITH inserted AS (
+                INSERT INTO clicks (tenant_id, link_id, clicked_at, referrer, user_agent, ip)
+                SELECT l.tenant_id, l.id, to_timestamp(x.ts), left(x.referrer, 2048), left(x.user_agent, 512),
+                       anonymize_ip(x.ip)
+                FROM json_to_recordset(p_clicks) AS x(code text, ts double precision, referrer text, user_agent text, ip text)
+                JOIN links l ON l.code = x.code
+                RETURNING 1
+            )
+            SELECT count(*) INTO n FROM inserted;
+            EXIT;
+        EXCEPTION WHEN foreign_key_violation THEN
+            -- A link was deleted while this batch was being inserted. Retry: the
+            -- join now skips it. (Locking the links rows instead cost ~12% of
+            -- ingest throughput on every batch to cover this rare race.)
+            IF attempt = 3 THEN RAISE; END IF;
+        END;
+    END LOOP;
+
+    -- ponytail: retries come within seconds; an hour of ids is plenty. ~1% of calls prune.
+    IF random() < 0.01 THEN
+        DELETE FROM click_batches WHERE recorded_at < now() - interval '1 hour';
+    END IF;
+    RETURN n;
+END $$;
 
 -- Grants ------------------------------------------------------------------------
 
@@ -241,10 +339,10 @@ GRANT EXECUTE ON FUNCTION
     api.create_api_key(text, boolean),
     api.revoke_api_key(text),
     api.internal_lookup_link(text),
-    api.internal_record_clicks(json)
+    api.internal_record_clicks(text, json)
 TO anon;
 GRANT SELECT, INSERT ON links TO anon;  -- RLS limits both to the caller's tenant
-GRANT SELECT ON clicks TO anon;
+GRANT SELECT ON clicks, link_totals, link_clicks_hourly, link_referrers_daily TO anon;
 GRANT SELECT ON api.link_stats, api.top_referrers TO anon;
 
 COMMIT;

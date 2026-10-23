@@ -9,7 +9,7 @@ flowchart TB
     subgraph edge["OpenResty :8001"]
         direction LR
         rl["Rate limit<br/>per client IP"] --> cache[("Link cache<br/>hit → 302, no DB")]
-        cache -->|push click| queue[("Click queue")] --> timer["Flush timer<br/>every 1 s"]
+        cache -->|push click| queue[("Click buffer<br/>per worker")] --> timer["Flush<br/>5,000 clicks or 1 s"]
     end
 
     rest["PostgREST · authenticate() maps X-API-Key → tenant"]
@@ -21,7 +21,7 @@ flowchart TB
     end
 
     client -->|"GET /r/{code} · /api/* with X-API-Key"| edge
-    edge -->|"cache miss · one batch INSERT per second · /api/*"| rest
+    edge -->|"capped cache misses · click batches · /api/*"| rest
     rest --> db
 
     classDef hot fill:#e6f4ea,stroke:#1e8e3e,color:#0d3b1e
@@ -57,9 +57,9 @@ sequenceDiagram
         Note over N: cache 60 s
         N-->>C: 302 → example.com/docs
     end
-    Note over N: queue click (after the reply)
+    Note over N: buffer click (after the reply)
 
-    loop every second
+    loop every second, or every 5,000 clicks
         N->>R: internal_record_clicks
         R->>P: one batch INSERT
     end
@@ -67,13 +67,13 @@ sequenceDiagram
 
 ## What it shows off
 
-- **The database is off the redirect path.** OpenResty caches code→URL in a `lua_shared_dict` and queues clicks in memory. One timer writes them to Postgres as a single batch insert every second. A redirect is a memory lookup. See [Benchmark](#benchmark).
+- **The database is off the redirect path.** OpenResty caches code→URL in shared memory, and each worker buffers its clicks and writes them to Postgres in batches of up to 5,000. A redirect is a memory lookup: 529,000 req/s with a 2 ms p99. See [Benchmark](#benchmark).
 - **Multi-tenancy is row-level security.** Each API key belongs to a tenant. A PostgREST pre-request hook (`authenticate()`) puts the tenant in the transaction, and one RLS policy per table scopes every read and write to it. Link creation runs as the caller (`SECURITY INVOKER`), so the policy applies there too.
-- **Analytics are SQL views served for free.** `api.link_stats` and `api.top_referrers` are plain views with `security_invoker`. PostgREST serves them with filtering, ordering and paging, and RLS scopes them per tenant. There is no endpoint code.
+- **Analytics are SQL views served for free.** `api.link_stats` and `api.top_referrers` are `security_invoker` views over rollup tables. A statement-level trigger keeps the rollups current on every click batch, so 10× the clicks doesn't mean 10× the query time (1 → 3 ms at 100k → 1M clicks). PostgREST serves the views with filtering, ordering and paging, and RLS scopes them per tenant. There is no endpoint code.
 - **Rules are constraints.** URLs must be `http(s)://`, and codes are 3–32 letters or digits. These are `CHECK` constraints, so no code path can skip them. Errors map to HTTP codes: `400` for an invalid value, `409` for a taken alias, `401` for a missing key, `403` for a non-admin key.
 - **Privacy by default.** API keys are stored as SHA-256 hashes. Click IPs are cut to /24 (IPv4) or /48 (IPv6) before they are stored.
-- **Degrades instead of failing.** When a cache entry expires, one request refreshes it while the rest keep getting the old URL. If Postgres stops answering, known links keep redirecting from memory, unknown codes fail in 2 s instead of hanging, and a full click queue costs clicks, never redirects.
-- **Tested in three layers.** 25 pgTAP tests check RLS, grants and every rule, with the code under test running as the real `anon` role. A 28-check HTTP smoke test runs against the full stack. A failure-mode test pauses PostgREST and floods a tiny click queue. CI runs all three on every push.
+- **Degrades instead of failing.** When a cache entry expires, one request refreshes it while the rest keep getting the old URL. Unknown codes have their own cache, so a scan can't evict real links. Lookups waiting on Postgres are capped, and the overflow is shed with 503 instead of queueing. If Postgres stops answering, known links keep redirecting, a retried click batch is never counted twice, and a full click buffer costs clicks (counted), never redirects.
+- **Tested in four layers.** 30 pgTAP tests check RLS, grants, rollups and every rule, with the code under test running as the real `anon` role. A 28-check HTTP smoke test runs against the full stack. A failure-mode test pauses PostgREST and floods a tiny click buffer. A chaos test runs a CPU- and RAM-limited stack through a stampede, a scan, a Postgres pause and 10× data, and asserts p99, request coalescing, exact click accounting and analytics scaling. CI runs all four.
 
 ## Run it
 
@@ -124,19 +124,27 @@ tests/smoke.sh
 tests/resilience.sh    # restarts OpenResty and pauses PostgREST, then restores both
 ```
 
+The chaos test runs on the limited stack and takes about 7 minutes:
+
+```bash
+RATE_LIMIT_REQUESTS=0 docker compose -f docker-compose.yml -f docker-compose.limits.yml up -d --build --wait
+tests/chaos_bench.sh
+```
+
 ## Benchmark
 
-`GET /r/{code}` for one hot link, `wrk -t4 -c64 -d20s`, rate limiting off (`RATE_LIMIT_REQUESTS=0`), nothing else changed between runs.
+`GET /r/{code}` for one link, `wrk -t4 -c64 -d20s` run inside the Docker network, rate limiting and the access log off. Machine: Apple M4 Max (16 cores), Docker in OrbStack.
 
-| Setup | Requests/s | p50 | p99 |
-|---|---:|---:|---:|
-| Before: one synchronous `INSERT` per click | 714 | 79 ms | 319 ms |
-| Clicks batched, cache off (`LINK_CACHE_SECONDS=0`) | 5,766 | 10.2 ms | 37 ms |
-| Clicks batched, cache on (default) | **80,578** | **0.65 ms** | 185 ms |
+| Node | Requests/s | p50 | p99 | Clicks written/s |
+|---|---:|---:|---:|---:|
+| All 16 cores, no limits | **529,005** | 0.06 ms | 2.1 ms | 306,000 |
+| Small node (`docker-compose.limits.yml`) | 212,224 | 0.27 ms | 1.5 ms | 111,000 |
 
-No clicks are lost under that load. In the cache-on run, `wrk` counted 1,611,594 completed redirects and Postgres recorded 1,611,652 clicks. The 58 extra are requests still in flight when `wrk` stopped (it had 64 connections open). `bench.sh` prints both numbers. Machine: Apple M4 Max (16 cores), Docker in OrbStack 2.2.4. `wrk` and all three containers share that machine, so treat the numbers as relative. Across repeated runs, cache-off throughput varied between about 5,000 and 6,000 req/s, and cache-on stayed near 80,000. The cache-on p99 is much higher than its p50. That tail hasn't been profiled yet: likely suspects are the click flush running on worker 0 and the machine being saturated.
+Both runs offer more clicks than Postgres can take. The rest are dropped and counted, never lost silently: 6,127,276 recorded + 4,507,169 dropped = every redirect served (plus 42 in flight). Below that ceiling, nothing is dropped.
 
-Run it yourself: `RATE_LIMIT_REQUESTS=0 docker compose up -d --wait && ./bench.sh`
+Run it: `RATE_LIMIT_REQUESTS=0 ACCESS_LOG=off docker compose up -d --wait && ./bench.sh`
+
+Earlier versions of this README showed about 80,000 req/s with a 185 ms p99. That was macOS port forwarding into Docker, not ref_pg: `wrk` now runs inside the network. **[docs/performance.md](docs/performance.md)** maps every buffer, lock and throughput limit, and has the before/after results of the chaos test on a small node.
 
 ## Configuration
 
@@ -151,7 +159,10 @@ Run it yourself: `RATE_LIMIT_REQUESTS=0 docker compose up -d --wait && ./bench.s
 | `LINK_CACHE_SECONDS` | `60` | How long a code→URL entry stays in memory. `0` turns the cache off |
 | `LINK_NEGATIVE_CACHE_SECONDS` | `10` | How long an unknown code is remembered |
 | `CLICK_FLUSH_SECONDS` | `1` | Click batch interval |
-| `CLICK_QUEUE_MB` | `64` | Click queue size, about 2,000 clicks per MB. Sets how long a Postgres outage can last before clicks are dropped |
+| `CLICK_BUFFER` | `200000` | Clicks OpenResty may hold while Postgres is slow or down, across all workers. Size it as click rate × the stall to survive: 200,000 is 10 s at 20,000 clicks/s |
+| `LOOKUP_CONCURRENCY` | `10` | Lookups allowed to wait on Postgres at once, across all workers. Past that, a cold miss gets 503. Worst-case wait = this ÷ lookups/s the node handles |
+| `LINK_CACHE_MB`, `LINK_MISS_CACHE_MB` | `32`, `8` | Link cache (~130,000 links) and unknown-code cache (~65,000 codes) |
+| `WORKER_PROCESSES` | `auto` | nginx workers. `auto` counts host cores, not a container CPU limit: set it to the CPU count you give the container |
 | `LOG_LEVEL`, `ACCESS_LOG` | `notice`, `/dev/stdout` | nginx logging. `ACCESS_LOG=off` disables the access log |
 | `CORS_ALLOW_ORIGIN` | `*` | |
 
@@ -164,13 +175,18 @@ docker/openresty/          nginx.conf (routes, rate limits), lua/links.lua (cach
 docker/postgres/           postgres:15 plus pgTAP
 tests/db.sql               pgTAP tests
 tests/smoke.sh             HTTP smoke test
-tests/resilience.sh        failure modes: stampede, outage, full click queue
-bench.sh                   wrk benchmark
+tests/resilience.sh        failure modes: stampede, outage, full click buffer
+tests/chaos_bench.sh       chaos test on the limited stack (with tests/chaos.lua, tests/loadgen/)
+docker-compose.limits.yml  CPU and RAM limits of a small node
+bench.sh                   wrk benchmark from inside the Docker network
+docs/performance.md        buffers, locks and throughput limits, with measurements
 ```
 
 ## Known limitations
 
-- **Clicks are buffered in memory.** A crash (not a normal stop) loses up to `CLICK_FLUSH_SECONDS` of clicks. If Postgres is down, clicks wait in the queue (about 130,000 at the default 64 MB, which is 1.6 s at 80,000 req/s). After that they are dropped and counted in one log line per flush.
+- **Clicks are buffered in memory.** A crash (not a normal stop) loses the clicks still in the buffer, up to about one flush interval. If Postgres is down, clicks wait in the buffer (`CLICK_BUFFER`, 200,000 by default); after that they are dropped and counted in one log line per worker per second.
+- **`clicks_24h` counts whole hours:** the current hour plus the 23 before it.
+- **The raw `clicks` table grows without bound** (about 130 bytes per click). The rollups don't need old rows, so time partitioning with old partitions dropped is the next step.
 - **During a Postgres outage, cached links keep their last known URL.** That includes a link taken down just before the outage.
 - **Referrer and user agent are stored as printable ASCII only.** Other bytes are stripped before a click is queued, because one invalid UTF-8 byte would make Postgres reject a whole batch.
 - **Each OpenResty instance has its own cache.** That's fine for one instance. With several, a takedown takes up to `LINK_CACHE_SECONDS` to reach all of them.

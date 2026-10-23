@@ -1,0 +1,22 @@
+# A small production node, so a many-core laptop cannot hide lock contention,
+# GC pauses or CPU starvation. Used by tests/chaos_bench.sh:
+#   docker compose -f docker-compose.yml -f docker-compose.limits.yml up -d --build --wait
+services:
+  openresty:
+    cpus: 1.0
+    mem_limit: 256m
+    environment:
+      # nginx "auto" counts the host's cores, not this container's CPU quota:
+      # 16 workers time-slicing 1 CPU would add latency, not throughput.
+      WORKER_PROCESSES: 1
+      # Little's law: this node answers ~130 lookups/s, so 4 in flight keeps a
+      # cold miss under ~30 ms of queueing; the rest are shed with 503.
+      LOOKUP_CONCURRENCY: 4
+
+  postgrest:
+    cpus: 0.5
+    mem_limit: 256m
+
+  db:
+    cpus: 1.0
+    mem_limit: 512m

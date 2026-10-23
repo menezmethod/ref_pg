@@ -2,19 +2,26 @@
 set -e
 
 : "${RATE_LIMIT_REQUESTS:=60}" "${RATE_LIMIT_WINDOW:=60}"
-: "${LINK_CACHE_SECONDS:=60}" "${LINK_NEGATIVE_CACHE_SECONDS:=10}" "${CLICK_FLUSH_SECONDS:=1}" "${CLICK_QUEUE_MB:=64}"
+: "${LINK_CACHE_SECONDS:=60}" "${LINK_NEGATIVE_CACHE_SECONDS:=10}" "${CLICK_FLUSH_SECONDS:=1}" "${CLICK_BUFFER:=200000}" "${LOOKUP_CONCURRENCY:=10}"
+: "${WORKER_PROCESSES:=auto}" "${LINK_CACHE_MB:=32}" "${LINK_MISS_CACHE_MB:=8}"
 : "${LOG_LEVEL:=notice}" "${ACCESS_LOG:=/dev/stdout}" "${CORS_ALLOW_ORIGIN:=*}" "${TRUSTED_PROXIES:=}"
 
-for name in RATE_LIMIT_REQUESTS RATE_LIMIT_WINDOW LINK_CACHE_SECONDS LINK_NEGATIVE_CACHE_SECONDS CLICK_FLUSH_SECONDS CLICK_QUEUE_MB; do
+for name in RATE_LIMIT_REQUESTS RATE_LIMIT_WINDOW LINK_CACHE_SECONDS LINK_NEGATIVE_CACHE_SECONDS CLICK_FLUSH_SECONDS CLICK_BUFFER LOOKUP_CONCURRENCY LINK_CACHE_MB LINK_MISS_CACHE_MB; do
   eval "value=\$$name"
   case "$value" in
     ''|*[!0-9]*) echo "ERROR: $name must be a non-negative integer, got '$value'" >&2; exit 1 ;;
   esac
 done
-if [ "$RATE_LIMIT_WINDOW" -lt 1 ] || [ "$CLICK_FLUSH_SECONDS" -lt 1 ] || [ "$CLICK_QUEUE_MB" -lt 1 ]; then
-  echo "ERROR: RATE_LIMIT_WINDOW, CLICK_FLUSH_SECONDS and CLICK_QUEUE_MB must be at least 1" >&2
+if [ "$RATE_LIMIT_WINDOW" -lt 1 ] || [ "$CLICK_FLUSH_SECONDS" -lt 1 ] || [ "$CLICK_BUFFER" -lt 1 ] || [ "$LOOKUP_CONCURRENCY" -lt 1 ] \
+   || [ "$LINK_CACHE_MB" -lt 1 ] || [ "$LINK_MISS_CACHE_MB" -lt 1 ]; then
+  echo "ERROR: RATE_LIMIT_WINDOW, CLICK_FLUSH_SECONDS, CLICK_BUFFER, LOOKUP_CONCURRENCY, LINK_CACHE_MB and LINK_MISS_CACHE_MB must be at least 1" >&2
   exit 1
 fi
+
+case "$WORKER_PROCESSES" in
+  auto) ;;
+  ''|*[!0-9]*|0) echo "ERROR: WORKER_PROCESSES must be auto or a positive integer, got '$WORKER_PROCESSES'" >&2; exit 1 ;;
+esac
 
 # nginx limit_req takes a rate per second or per minute, so convert
 # "N requests per W seconds" to requests per minute (rounded up).
@@ -29,11 +36,11 @@ else
   RATE_LIMIT_KEY='$binary_remote_addr'
 fi
 
-export RATE_LIMIT_PER_MIN RATE_LIMIT_KEY LINK_CACHE_SECONDS LINK_NEGATIVE_CACHE_SECONDS CLICK_FLUSH_SECONDS CLICK_QUEUE_MB \
-       LOG_LEVEL ACCESS_LOG CORS_ALLOW_ORIGIN
+export RATE_LIMIT_PER_MIN RATE_LIMIT_KEY LINK_CACHE_SECONDS LINK_NEGATIVE_CACHE_SECONDS CLICK_FLUSH_SECONDS CLICK_BUFFER LOOKUP_CONCURRENCY \
+       WORKER_PROCESSES LINK_CACHE_MB LINK_MISS_CACHE_MB LOG_LEVEL ACCESS_LOG CORS_ALLOW_ORIGIN
 
 CONF=/usr/local/openresty/nginx/conf
-envsubst '${RATE_LIMIT_PER_MIN} ${RATE_LIMIT_KEY} ${LINK_CACHE_SECONDS} ${LINK_NEGATIVE_CACHE_SECONDS} ${CLICK_FLUSH_SECONDS} ${CLICK_QUEUE_MB} ${LOG_LEVEL} ${ACCESS_LOG} ${CORS_ALLOW_ORIGIN}' \
+envsubst '${RATE_LIMIT_PER_MIN} ${RATE_LIMIT_KEY} ${LINK_CACHE_SECONDS} ${LINK_NEGATIVE_CACHE_SECONDS} ${CLICK_FLUSH_SECONDS} ${CLICK_BUFFER} ${LOOKUP_CONCURRENCY} ${WORKER_PROCESSES} ${LINK_CACHE_MB} ${LINK_MISS_CACHE_MB} ${LOG_LEVEL} ${ACCESS_LOG} ${CORS_ALLOW_ORIGIN}' \
   < "$CONF/nginx.conf.template" > "$CONF/nginx.conf"
 
 # TRUSTED_PROXIES: CIDRs of reverse proxies in front of this container
@@ -50,6 +57,6 @@ if [ -s "$CONF/real_ip.conf" ]; then
   printf 'real_ip_header X-Forwarded-For;\nreal_ip_recursive on;\n' >> "$CONF/real_ip.conf"
 fi
 
-echo "Rate limit ${RATE_LIMIT_PER_MIN}r/m per IP (key: ${RATE_LIMIT_KEY}), link cache ${LINK_CACHE_SECONDS}s (miss ${LINK_NEGATIVE_CACHE_SECONDS}s)," \
-     "click flush every ${CLICK_FLUSH_SECONDS}s, click queue ${CLICK_QUEUE_MB} MB, trusted proxies: ${TRUSTED_PROXIES:-none}"
+echo "Workers ${WORKER_PROCESSES}, rate limit ${RATE_LIMIT_PER_MIN}r/m per IP (key: ${RATE_LIMIT_KEY}), link cache ${LINK_CACHE_SECONDS}s (miss ${LINK_NEGATIVE_CACHE_SECONDS}s)," \
+     "click flush every ${CLICK_FLUSH_SECONDS}s, click buffer ${CLICK_BUFFER}, lookups in flight ${LOOKUP_CONCURRENCY}, trusted proxies: ${TRUSTED_PROXIES:-none}"
 exec "$@"

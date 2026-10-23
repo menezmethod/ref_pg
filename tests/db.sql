@@ -4,7 +4,7 @@
 \set ON_ERROR_STOP 1
 BEGIN;
 CREATE EXTENSION pgtap;
-SELECT plan(25);
+SELECT plan(30);
 
 -- Act like PostgREST does for a request carrying this X-API-Key (NULL = none).
 CREATE FUNCTION pg_temp.act_as(p_key text) RETURNS void LANGUAGE plpgsql AS $$
@@ -64,7 +64,11 @@ SELECT is(pg_temp.error_as_anon($$SELECT api.create_short_link('javascript:alert
           'a javascript: URL violates a check constraint (HTTP 400)');
 SELECT is(pg_temp.error_as_anon($$SELECT api.create_short_link('https://a.com', 'alpha')$$), '23505',
           'a duplicate alias is a unique violation (HTTP 409)');
+SELECT is(pg_temp.error_as_anon(format('SELECT api.create_short_link(%L)', 'https://a.com/x' || chr(1) || 'y')),
+          '23514', 'a URL with a control character is rejected (OpenResty would answer 500)');
 SELECT is(pg_temp.as_anon('SELECT count(*) FROM links'), '1', 'tenant A sees its own link');
+SELECT is(pg_temp.as_anon($$SELECT length(api.create_short_link('https://a.com/gen')->>'code')$$), '7',
+          'a generated code has 7 characters');
 
 -- Tenant B is isolated and not an admin
 SELECT pg_temp.act_as(:'key_b');
@@ -79,9 +83,12 @@ SELECT is(pg_temp.error_as_anon($$SELECT issue_api_key('t', 'x', true)$$), '4250
           'anon cannot call the internal key helper');
 
 -- Click recording (what the OpenResty flusher calls)
-SELECT is(pg_temp.as_anon($$SELECT api.internal_record_clicks(
+SELECT is(pg_temp.as_anon($$SELECT api.internal_record_clicks('batch-1',
               '[{"code":"alpha","ts":1700000000,"ip":"203.0.113.77"},{"code":"nosuch","ts":1700000000}]')$$),
           '1', 'clicks for unknown codes are skipped');
+SELECT is(pg_temp.as_anon($$SELECT api.internal_record_clicks('batch-1',
+              '[{"code":"alpha","ts":1700000000,"ip":"203.0.113.77"}]')$$),
+          '0', 'a retried batch id is not recorded twice');
 SELECT is((SELECT c.ip FROM clicks c JOIN links l ON l.id = c.link_id WHERE l.code = 'alpha'),
           '203.0.113.0/24'::inet, 'the stored click IP is truncated');
 SELECT is((SELECT c.tenant_id FROM clicks c JOIN links l ON l.id = c.link_id WHERE l.code = 'alpha'),
@@ -94,6 +101,12 @@ SELECT is(pg_temp.as_anon('SELECT count(*) FROM api.link_stats'), '0', 'tenant B
 SELECT pg_temp.act_as(:'key_a');
 SELECT is(pg_temp.as_anon($$SELECT clicks FROM api.link_stats WHERE code = 'alpha'$$), '1',
           'tenant A link_stats counts the click');
+SELECT is(pg_temp.as_anon($$SELECT referrer || '=' || clicks FROM api.top_referrers WHERE code = 'alpha'$$),
+          '(direct)=1', 'top_referrers counts a click without a referrer as (direct)');
+SELECT pg_temp.as_anon(format($$SELECT api.internal_record_clicks('batch-2', '[{"code":"alpha","ts":%s}]')$$,
+                              extract(epoch FROM now())));
+SELECT is(pg_temp.as_anon($$SELECT clicks || '/' || clicks_24h FROM api.link_stats WHERE code = 'alpha'$$),
+          '2/1', 'the rollups count an old click in clicks and a new one in clicks_24h too');
 
 -- Key management
 SELECT is(pg_temp.as_anon($$SELECT length(api.create_api_key('ci'))$$), '48', 'an admin key creates a key');
