@@ -161,6 +161,7 @@ add_clicks() {
        from generate_series(1, $1) g" >/dev/null
   sql "analyze clicks" >/dev/null
 }
+sql "select create_click_partitions((now() at time zone 'UTC')::date - 31, (now() at time zone 'UTC')::date)" >/dev/null
 add_clicks 100000
 s1=$(exec_ms "$SID" "select * from api.link_stats") t1=$(exec_ms "$SID" "select * from api.top_referrers")
 add_clicks 900000
@@ -170,5 +171,29 @@ echo "     link_stats ${s1} ms -> ${s10} ms, top_referrers ${t1} ms -> ${t10} ms
 # (ratios of 1-3 ms timings are noise). A full scan grows ~10x and fails either way.
 check_le "link_stats ms at 10x clicks" $(( s1 * SCALE_RATIO_MAX > s1 + 10 ? s1 * SCALE_RATIO_MAX : s1 + 10 )) "$s10"
 check_le "top_referrers ms at 10x clicks" $(( t1 * SCALE_RATIO_MAX > t1 + 10 ? t1 * SCALE_RATIO_MAX : t1 + 10 )) "$t10"
+
+echo "# 5. Retention under load: drop raw clicks older than 7 days while clicks arrive at ${RATE}/s"
+total0=$(sql "select sum(clicks) from link_totals where tenant_id = $SID")
+restart_openresty
+hit_each "$HOT" $N_HOT >/dev/null
+sleep 2; c0=$(clicks_like "$HOT")
+loadgen wrk -t2 -c$CONNS -d15s -s /t/chaos.lua http://openresty -- "$HOT" $N_HOT 1 "$RATE" $CONNS > /tmp/ref_pg_chaos_retention &
+sleep 5
+m=$(sql "select json_array_length(m->'dropped') || ' ' || json_array_length(m->'skipped') || ' ' ||
+            round(extract(epoch from clock_timestamp() - statement_timestamp()) * 1000)
+         from (select api.internal_maintain_clicks(7) m) x")
+wait
+r=$(grep RESULT /tmp/ref_pg_chaos_retention); echo "     $r"
+set -- $m; dropped_parts=$1 skipped_parts=$2 maint_ms=$3
+echo "     maintenance: dropped $dropped_parts partitions, skipped $skipped_parts, in $maint_ms ms"
+ok302=$(field "$r" ok302) p99=$(( $(field "$r" p99_us) / 1000 ))
+sleep 15
+c1=$(clicks_like "$HOT")
+check "partitions older than 7 days dropped (days -31 to -8)" 24 "$dropped_parts"
+check "none skipped on a lock timeout" 0 "$skipped_parts"
+check "raw clicks older than 7 days left" 0 "$(sql "select count(*) from clicks where clicked_at < (now() at time zone 'UTC')::date - 7")"
+check "link_stats totals unchanged (rollups keep dropped days)" "$total0" "$(sql "select sum(clicks) from link_totals where tenant_id = $SID")"
+check_le "redirect p99 ms while partitions are dropped" "$P99_MS_MAX" "$p99"
+check_between "no clicks lost while partitions are dropped" "$ok302" $(( ok302 + CONNS )) $(( c1 - c0 ))
 
 exit $fail

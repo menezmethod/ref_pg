@@ -71,17 +71,45 @@ CREATE TABLE links (
 CREATE INDEX links_tenant_id ON links (tenant_id);
 
 -- ip holds a truncated network (/24 for IPv4, /48 for IPv6), never a full address.
+-- Partitioned by UTC day (clicks_YYYYMMDD), so retention drops whole days
+-- instead of deleting rows. See create_click_partitions() and
+-- api.internal_maintain_clicks(). The rollups below never read old clicks, so
+-- dropping a day changes no statistic.
 CREATE TABLE clicks (
-    id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    id         bigserial,  -- (identity columns on partitioned tables need Postgres 17)
     tenant_id  bigint NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     link_id    bigint NOT NULL REFERENCES links(id) ON DELETE CASCADE,
     clicked_at timestamptz NOT NULL DEFAULT now(),
     referrer   text,
     user_agent text,
-    ip         inet
-);
+    ip         inet,
+    PRIMARY KEY (id, clicked_at)
+) PARTITION BY RANGE (clicked_at);
 CREATE INDEX clicks_link_id_clicked_at ON clicks (link_id, clicked_at);
 CREATE INDEX clicks_tenant_id ON clicks (tenant_id);
+
+-- Creates the missing daily partitions for p_from..p_to (UTC dates) and returns
+-- how many it created. Each is built standalone and then attached: ATTACH needs
+-- only a SHARE UPDATE EXCLUSIVE lock on clicks, so inserts never wait for it
+-- (CREATE TABLE ... PARTITION OF would take ACCESS EXCLUSIVE).
+CREATE FUNCTION create_click_partitions(p_from date, p_to date)
+RETURNS integer LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
+DECLARE
+    d       date;
+    created integer := 0;
+    part    text;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtext('create_click_partitions'));  -- one creator at a time
+    FOR d IN SELECT generate_series(p_from, p_to, interval '1 day')::date LOOP
+        part := 'clicks_' || to_char(d, 'YYYYMMDD');
+        CONTINUE WHEN to_regclass(part) IS NOT NULL;
+        EXECUTE format('CREATE TABLE %I (LIKE clicks INCLUDING DEFAULTS)', part);
+        EXECUTE format('ALTER TABLE clicks ATTACH PARTITION %I FOR VALUES FROM (%L) TO (%L)',
+                       part, d::timestamp AT TIME ZONE 'UTC', (d + 1)::timestamp AT TIME ZONE 'UTC');
+        created := created + 1;
+    END LOOP;
+    RETURN created;
+END $$;
 
 -- Rollups, kept current by a trigger on clicks, so analytics cost grows with
 -- links and days, not with clicks. Raw clicks stay for ad-hoc queries.
@@ -316,19 +344,63 @@ BEGIN
             )
             SELECT count(*) INTO n FROM inserted;
             EXIT;
-        EXCEPTION WHEN foreign_key_violation THEN
-            -- A link was deleted while this batch was being inserted. Retry: the
-            -- join now skips it. (Locking the links rows instead cost ~12% of
-            -- ingest throughput on every batch to cover this rare race.)
-            IF attempt = 3 THEN RAISE; END IF;
+        EXCEPTION
+            WHEN foreign_key_violation THEN
+                -- A link was deleted while this batch was being inserted. Retry: the
+                -- join now skips it. (Locking the links rows instead cost ~12% of
+                -- ingest throughput on every batch to cover this rare race.)
+                IF attempt = 3 THEN RAISE; END IF;
+            WHEN check_violation THEN
+                -- No partition for some click's day: maintenance has not run (it
+                -- creates a week ahead). Create the batch's days and retry.
+                IF attempt = 3 THEN RAISE; END IF;
+                PERFORM create_click_partitions(min(d), max(d))
+                FROM (SELECT (to_timestamp(x.ts) AT TIME ZONE 'UTC')::date AS d
+                      FROM json_to_recordset(p_clicks) AS x(ts double precision)) days;
         END;
     END LOOP;
-
-    -- ponytail: retries come within seconds; an hour of ids is plenty. ~1% of calls prune.
-    IF random() < 0.01 THEN
-        DELETE FROM click_batches WHERE recorded_at < now() - interval '1 hour';
-    END IF;
     RETURN n;
+END $$;
+
+-- Called hourly by OpenResty (and at its start). Creates the partitions for
+-- today and the next 7 UTC days, drops partitions older than p_retention_days
+-- (0 keeps everything), and prunes rollup and batch-id rows nothing reads.
+-- Dropping a partition briefly takes ACCESS EXCLUSIVE on clicks: lock_timeout
+-- keeps a busy moment from stalling inserts behind it; the next run retries.
+CREATE FUNCTION api.internal_maintain_clicks(p_retention_days integer DEFAULT 90)
+RETURNS json LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    today   date := (now() AT TIME ZONE 'UTC')::date;
+    created integer;
+    dropped text[] := '{}';
+    skipped text[] := '{}';
+    part    text;
+BEGIN
+    IF p_retention_days IS NULL OR p_retention_days < 0 THEN
+        RAISE EXCEPTION 'p_retention_days must be 0 (keep everything) or more' USING ERRCODE = '22023';
+    END IF;
+    created := create_click_partitions(today, today + 7);
+
+    IF p_retention_days > 0 THEN
+        FOR part IN
+            SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+            WHERE i.inhparent = 'clicks'::regclass AND c.relname ~ '^clicks_[0-9]{8}$'
+              AND to_date(substr(c.relname, 8), 'YYYYMMDD') < today - p_retention_days
+            ORDER BY c.relname
+        LOOP
+            BEGIN
+                PERFORM set_config('lock_timeout', '2s', true);
+                EXECUTE format('DROP TABLE %I', part);
+                dropped := dropped || part;
+            EXCEPTION WHEN lock_not_available THEN
+                skipped := skipped || part;
+            END;
+        END LOOP;
+    END IF;
+
+    DELETE FROM link_clicks_hourly WHERE hour < now() - interval '48 hours';  -- clicks_24h reads 24
+    DELETE FROM click_batches WHERE recorded_at < now() - interval '1 hour';  -- retries come within seconds
+    RETURN json_build_object('created', created, 'dropped', dropped, 'skipped', skipped);
 END $$;
 
 -- Grants ------------------------------------------------------------------------
@@ -339,10 +411,13 @@ GRANT EXECUTE ON FUNCTION
     api.create_api_key(text, boolean),
     api.revoke_api_key(text),
     api.internal_lookup_link(text),
-    api.internal_record_clicks(text, json)
+    api.internal_record_clicks(text, json),
+    api.internal_maintain_clicks(integer)
 TO anon;
 GRANT SELECT, INSERT ON links TO anon;  -- RLS limits both to the caller's tenant
 GRANT SELECT ON clicks, link_totals, link_clicks_hourly, link_referrers_daily TO anon;
 GRANT SELECT ON api.link_stats, api.top_referrers TO anon;
+
+SELECT create_click_partitions((now() AT TIME ZONE 'UTC')::date, (now() AT TIME ZONE 'UTC')::date + 7);
 
 COMMIT;

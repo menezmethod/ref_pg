@@ -29,15 +29,15 @@ local function clean(s, max)
     return (s:gsub("[^\32-\126]", "")):sub(1, max)
 end
 
--- Minimal HTTP/1.1 POST over a cosocket (ngx.location.capture is not available in
--- timers). Returns the status code, or nil and an error.
+-- Minimal HTTP/1.0 POST over a cosocket (ngx.location.capture is not available in
+-- timers). Returns the status code and the response body, or nil and an error.
 local function post(path, body)
     local sock = ngx.socket.tcp()
     sock:settimeout(5000)
     local ok, err = sock:connect("postgrest", 3000)
     if not ok then return nil, err end
     local sent, serr = sock:send(table.concat({
-        "POST ", path, " HTTP/1.1\r\n",
+        "POST ", path, " HTTP/1.0\r\n",  -- 1.0: no chunked response to decode
         "Host: postgrest\r\n",
         "Content-Type: application/json\r\n",
         "Content-Length: ", #body, "\r\n",
@@ -45,10 +45,10 @@ local function post(path, body)
         body,
     }))
     if not sent then sock:close(); return nil, serr end
-    local line, rerr = sock:receive("*l")
+    local response, rerr = sock:receive("*a")  -- Connection: close, so this reads to the end
     sock:close()
-    if not line then return nil, rerr end
-    return tonumber(line:match("^HTTP/%d%.%d (%d+)"))
+    if not response then return nil, rerr end
+    return tonumber(response:match("^HTTP/%d%.%d (%d+)")), response:match("\r\n\r\n(.*)$")
 end
 
 -- Sends one batch. Returns true when it is done with (written, or rejected as
@@ -141,11 +141,28 @@ function _M.push(code, referrer, user_agent, ip)
     end
 end
 
-function _M.start(interval, total_buffer)
+-- Partition upkeep for the clicks table (api.internal_maintain_clicks): create the
+-- coming days, drop days past retention. Logged, since it deletes data.
+local function maintain(premature, retention_days)
+    if premature then return end
+    local status, body = post("/rpc/internal_maintain_clicks",
+                              '{"p_retention_days":' .. retention_days .. '}')
+    if status == 200 then
+        ngx.log(ngx.NOTICE, "click partitions maintained (retention ", retention_days, " days): ", body)
+    else
+        ngx.log(ngx.ERR, "click partition maintenance failed (", status or body, "), retrying in an hour")
+    end
+end
+
+function _M.start(interval, total_buffer, retention_days)
     -- Size by total, not per worker: memory stays bounded however many workers run.
     max_buffered = math.max(1, math.ceil(total_buffer / ngx.worker.count()))
     -- On shutdown the timer fires once more with premature = true; flush then too.
     ngx.timer.every(interval, tick)
+    if ngx.worker.id() == 0 then
+        ngx.timer.at(0, maintain, retention_days)
+        ngx.timer.every(3600, maintain, retention_days)
+    end
 end
 
 return _M

@@ -70,10 +70,11 @@ sequenceDiagram
 - **The database is off the redirect path.** OpenResty caches code→URL in shared memory, and each worker buffers its clicks and writes them to Postgres in batches of up to 5,000. A redirect is a memory lookup: 529,000 req/s with a 2 ms p99. See [Benchmark](#benchmark).
 - **Multi-tenancy is row-level security.** Each API key belongs to a tenant. A PostgREST pre-request hook (`authenticate()`) puts the tenant in the transaction, and one RLS policy per table scopes every read and write to it. Link creation runs as the caller (`SECURITY INVOKER`), so the policy applies there too.
 - **Analytics are SQL views served for free.** `api.link_stats` and `api.top_referrers` are `security_invoker` views over rollup tables. A statement-level trigger keeps the rollups current on every click batch, so 10× the clicks doesn't mean 10× the query time (1 → 3 ms at 100k → 1M clicks). PostgREST serves the views with filtering, ordering and paging, and RLS scopes them per tenant. There is no endpoint code.
+- **Retention without `DELETE`.** `clicks` is partitioned by UTC day. OpenResty calls a maintenance function every hour that attaches the coming week's partitions and drops days past `CLICK_RETENTION_DAYS`. Dropping 24 days under load took 12 ms and lost no clicks. A click for a day with no partition creates it on the spot.
 - **Rules are constraints.** URLs must be `http(s)://`, and codes are 3–32 letters or digits. These are `CHECK` constraints, so no code path can skip them. Errors map to HTTP codes: `400` for an invalid value, `409` for a taken alias, `401` for a missing key, `403` for a non-admin key.
 - **Privacy by default.** API keys are stored as SHA-256 hashes. Click IPs are cut to /24 (IPv4) or /48 (IPv6) before they are stored.
 - **Degrades instead of failing.** When a cache entry expires, one request refreshes it while the rest keep getting the old URL. Unknown codes have their own cache, so a scan can't evict real links. Lookups waiting on Postgres are capped, and the overflow is shed with 503 instead of queueing. If Postgres stops answering, known links keep redirecting, a retried click batch is never counted twice, and a full click buffer costs clicks (counted), never redirects.
-- **Tested in four layers.** 30 pgTAP tests check RLS, grants, rollups and every rule, with the code under test running as the real `anon` role. A 28-check HTTP smoke test runs against the full stack. A failure-mode test pauses PostgREST and floods a tiny click buffer. A chaos test runs a CPU- and RAM-limited stack through a stampede, a scan, a Postgres pause and 10× data, and asserts p99, request coalescing, exact click accounting and analytics scaling. CI runs all four.
+- **Tested in four layers.** 38 pgTAP tests check RLS, grants, rollups, partitioning, retention and every rule, with the code under test running as the real `anon` role. A 28-check HTTP smoke test runs against the full stack. A failure-mode test pauses PostgREST and floods a tiny click buffer. A chaos test runs a CPU- and RAM-limited stack through a stampede, a scan, a Postgres pause and 10× data, and asserts p99, request coalescing, exact click accounting, analytics scaling and retention under load. CI runs all four.
 
 ## Run it
 
@@ -159,6 +160,7 @@ Earlier versions of this README showed about 80,000 req/s with a 185 ms p99. Tha
 | `LINK_CACHE_SECONDS` | `60` | How long a code→URL entry stays in memory. `0` turns the cache off |
 | `LINK_NEGATIVE_CACHE_SECONDS` | `10` | How long an unknown code is remembered |
 | `CLICK_FLUSH_SECONDS` | `1` | Click batch interval |
+| `CLICK_RETENTION_DAYS` | `90` | Days of raw clicks to keep. `clicks` is partitioned by UTC day and older days are dropped hourly. `0` keeps everything. Link stats come from rollups and don't change |
 | `CLICK_BUFFER` | `200000` | Clicks OpenResty may hold while Postgres is slow or down, across all workers. Size it as click rate × the stall to survive: 200,000 is 10 s at 20,000 clicks/s |
 | `LOOKUP_CONCURRENCY` | `10` | Lookups allowed to wait on Postgres at once, across all workers. Past that, a cold miss gets 503. Worst-case wait = this ÷ lookups/s the node handles |
 | `LINK_CACHE_MB`, `LINK_MISS_CACHE_MB` | `32`, `8` | Link cache (~130,000 links) and unknown-code cache (~65,000 codes) |
@@ -186,7 +188,8 @@ docs/performance.md        buffers, locks and throughput limits, with measuremen
 
 - **Clicks are buffered in memory.** A crash (not a normal stop) loses the clicks still in the buffer, up to about one flush interval. If Postgres is down, clicks wait in the buffer (`CLICK_BUFFER`, 200,000 by default); after that they are dropped and counted in one log line per worker per second.
 - **`clicks_24h` counts whole hours:** the current hour plus the 23 before it.
-- **The raw `clicks` table grows without bound** (about 130 bytes per click). The rollups don't need old rows, so time partitioning with old partitions dropped is the next step.
+- **Retention is by whole UTC days.** Raw clicks older than `CLICK_RETENTION_DAYS` go away a day at a time. Plan disk for about 130 bytes per click: 90 days at 1,000 clicks/s is about 1 TB.
+- **`top_referrers` is all-time,** so its daily rollup is never pruned. It grows with links × days × distinct referrers.
 - **During a Postgres outage, cached links keep their last known URL.** That includes a link taken down just before the outage.
 - **Referrer and user agent are stored as printable ASCII only.** Other bytes are stripped before a click is queued, because one invalid UTF-8 byte would make Postgres reject a whole batch.
 - **Each OpenResty instance has its own cache.** That's fine for one instance. With several, a takedown takes up to `LINK_CACHE_SECONDS` to reach all of them.

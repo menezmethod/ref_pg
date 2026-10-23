@@ -28,7 +28,8 @@ The tool throughout is Little's law, L = λ × W: items waiting = arrival rate �
 | Refresh locks `link_locks` | 1 MB, one entry per code under refresh, ≤ 4 s | — | — | — |
 | PostgREST pool | 10 connections, shared by lookups and click batches | — | — | Requests queue inside PostgREST |
 | Lookups in flight (after) | `LOOKUP_CONCURRENCY` = 10 in total, 4 on the small node | — | — | Cold miss gets 503 + `Retry-After: 1`; a refresh keeps the old URL |
-| `clicks` table | Disk. About 130 B per row with indexes (22M rows = 2.9 GB) | 11 GB/day | 560 GB/day | No retention job yet: see Limits |
+| `clicks` table | Disk, partitioned by UTC day; days older than `CLICK_RETENTION_DAYS` (90) dropped hourly. About 130 B per row with indexes | 11 GB/day, about 1 TB at 90 days | 560 GB/day, 50 TB at 90 days: lower the retention | Oldest whole day dropped; link stats unchanged (rollups) |
+| `link_clicks_hourly` | Pruned after 48 h (`clicks_24h` reads the last 24) | — | — | — |
 | `click_batches` | 1 row per batch (one per second per worker, or per 5,000 clicks), pruned after 1 h | ~3,600 rows | ~36,000 rows | — |
 
 **Sushi belts found (bad traffic sharing a lane with good):**
@@ -46,6 +47,7 @@ The tool throughout is Little's law, L = λ × W: items waiting = arrival rate �
 | PL/pgSQL subtransactions | One per generated code (`EXCEPTION WHEN unique_violation`) | None for code generation (`ON CONFLICT DO NOTHING`); one per click batch for the rare foreign-key race |
 | Rollup row locks | — | Concurrent batches upsert the same hot rows. `ORDER BY` makes them lock in the same order, so they wait instead of deadlocking |
 | `FOR KEY SHARE` on every batch | — | Tried and removed: it cost ~12% of insert throughput to guard against a rare race. Retrying on the foreign-key error costs nothing until it happens |
+| Partition upkeep | — | New days are built standalone and attached (SHARE UPDATE EXCLUSIVE: inserts never wait). Dropping a day takes ACCESS EXCLUSIVE on `clicks` for milliseconds, with a 2 s `lock_timeout`. A skipped day is retried next hour |
 | `api_keys.last_used_at` | One row update per API write; one busy key serializes writes on that row | Unchanged. Link creation is low-volume |
 
 ## 2. The hardware envelope
@@ -63,6 +65,7 @@ The tool throughout is Little's law, L = λ × W: items waiting = arrival rate �
 | 3c. Overload | Unpaced load, past ingest capacity | Recorded + counted drops = 302s served: overload is visible, never silent |
 | 3b. Poison record | A link deleted while its clicks wait in the buffer | Every other click in the same batches is recorded |
 | 4. Analytics scaling | One tenant at 100,000 then 1,000,000 clicks | 10× clicks ≤ 3× the query time (or +10 ms) |
+| 5. Retention under load | Drop every day older than 7 (24 partitions, ~1.1M rows) during 15 s at 20,000 req/s | All 24 dropped, none skipped on a lock timeout; no raw rows older than 7 days; rollup totals unchanged; p99 ≤ 50 ms; clicks recorded = 302s served |
 
 `wrk` counts completed responses, so up to 64 requests in flight at the end are served but not counted: "recorded = served" allows +64.
 
@@ -83,6 +86,7 @@ Same test, same limited node, before and after the changes in this commit.
 | 3b. Clicks lost to a deleted link's batch | 0 | 0 |
 | 4. `link_stats`, 100k → 1M clicks | **122 → 1,418 ms** (fail) | **1 → 3 ms** |
 | 4. `top_referrers`, 100k → 1M clicks | **160 → 1,618 ms** (fail) | **31 → 48 ms** |
+| 5. Drop 24 days of raw clicks under load | not possible (no partitions) | **12 ms**, 0 clicks lost, p99 1.6 ms |
 
 On all 16 cores with no limits, per-worker flushing raised the click-write ceiling from about 110,000–150,000/s (one flusher, worker 0) to **306,000/s**, at 529,005 req/s and a 2.1 ms p99. Accounting stayed exact: 6,127,276 recorded + 4,507,169 dropped and counted = 10,634,403 redirects served (+42 in flight).
 
@@ -92,6 +96,8 @@ At full saturation the click-write ceiling fell from about 131k/s to 89–111k/s
 
 - **The rollup trigger costs about 13%** of insert time (238 vs 211 ms per 40,000 clicks in Postgres). That's the price of analytics that don't scan clicks.
 - **The redirect path got cheaper and served more** on the same single CPU (196k → 212–221k req/s), leaving less of that CPU for flushing.
+
+Partitioning adds only a few percent: the insert function takes 292–311 ms per 40,000 clicks in Postgres, against 315 ms before (about 130,000 clicks/s). End to end, the saturation ceiling on one CPU varies a lot from run to run (73,000–111,000 clicks/s across runs), because redirects and flushing share that CPU.
 
 Below saturation nothing is lost, and above it every dropped click is counted. To raise the ceiling: more OpenResty CPUs (each worker flushes its own buffer in parallel) and more PostgREST CPU (it parses every batch).
 
@@ -104,6 +110,6 @@ Below saturation nothing is lost, and above it every dropped click is counted. T
 
 ## Limits
 
-- **`clicks` grows without bound.** The rollups no longer need old raw clicks, so the next step is time partitioning, then dropping old partitions.
+- **Retention works in whole UTC days.** `link_referrers_daily` is kept forever, since `top_referrers` is all-time. It grows with links × days × distinct referrers.
 - **One busy API key serializes writes** on its `last_used_at` row.
 - **The ingest ceiling is set by CPU:** one OpenResty worker and half a PostgREST CPU on the small node.

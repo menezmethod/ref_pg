@@ -4,7 +4,7 @@
 \set ON_ERROR_STOP 1
 BEGIN;
 CREATE EXTENSION pgtap;
-SELECT plan(30);
+SELECT plan(38);
 
 -- Act like PostgREST does for a request carrying this X-API-Key (NULL = none).
 CREATE FUNCTION pg_temp.act_as(p_key text) RETURNS void LANGUAGE plpgsql AS $$
@@ -49,6 +49,10 @@ SELECT is(anonymize_ip('2001:db8:1:2::5'), '2001:db8:1::/48'::inet, 'IPv6 is tru
 SELECT ok(anonymize_ip('junk') IS NULL, 'an invalid IP becomes NULL');
 SELECT ok((SELECT relrowsecurity FROM pg_class WHERE oid = 'links'::regclass), 'RLS is on for links');
 SELECT ok((SELECT relrowsecurity FROM pg_class WHERE oid = 'clicks'::regclass), 'RLS is on for clicks');
+SELECT is((SELECT relkind::text FROM pg_class WHERE oid = 'clicks'::regclass), 'p', 'clicks is partitioned');
+SELECT is((SELECT count(*)::int FROM generate_series(0, 7) g
+           WHERE to_regclass('clicks_' || to_char((now() AT TIME ZONE 'UTC')::date + g, 'YYYYMMDD')) IS NOT NULL),
+          8, 'partitions exist for today and the next 7 days');
 
 -- Authentication
 SELECT pg_temp.act_as(NULL);
@@ -89,6 +93,8 @@ SELECT is(pg_temp.as_anon($$SELECT api.internal_record_clicks('batch-1',
 SELECT is(pg_temp.as_anon($$SELECT api.internal_record_clicks('batch-1',
               '[{"code":"alpha","ts":1700000000,"ip":"203.0.113.77"}]')$$),
           '0', 'a retried batch id is not recorded twice');
+SELECT ok(to_regclass('clicks_20231114') IS NOT NULL,
+          'a click for a day without a partition creates that day''s partition');
 SELECT is((SELECT c.ip FROM clicks c JOIN links l ON l.id = c.link_id WHERE l.code = 'alpha'),
           '203.0.113.0/24'::inet, 'the stored click IP is truncated');
 SELECT is((SELECT c.tenant_id FROM clicks c JOIN links l ON l.id = c.link_id WHERE l.code = 'alpha'),
@@ -107,6 +113,18 @@ SELECT pg_temp.as_anon(format($$SELECT api.internal_record_clicks('batch-2', '[{
                               extract(epoch FROM now())));
 SELECT is(pg_temp.as_anon($$SELECT clicks || '/' || clicks_24h FROM api.link_stats WHERE code = 'alpha'$$),
           '2/1', 'the rollups count an old click in clicks and a new one in clicks_24h too');
+
+-- Retention (what OpenResty calls every hour)
+SELECT is(pg_temp.as_anon($$SELECT api.internal_maintain_clicks(0)->>'dropped'$$), '[]',
+          'retention 0 keeps every partition');
+SELECT ok(pg_temp.as_anon($$SELECT api.internal_maintain_clicks(30)->>'dropped'$$) LIKE '%clicks_20231114%',
+          'retention 30 drops the 2023 partition');
+SELECT is((SELECT count(*)::int FROM clicks c JOIN links l ON l.id = c.link_id WHERE l.code = 'alpha'), 1,
+          'only the recent raw click remains');
+SELECT is(pg_temp.as_anon($$SELECT clicks FROM api.link_stats WHERE code = 'alpha'$$), '2',
+          'link_stats still counts the dropped day (rollups are kept)');
+SELECT is(pg_temp.error_as_anon('SELECT api.internal_maintain_clicks(-1)'), '22023',
+          'a negative retention is rejected');
 
 -- Key management
 SELECT is(pg_temp.as_anon($$SELECT length(api.create_api_key('ci'))$$), '48', 'an admin key creates a key');
