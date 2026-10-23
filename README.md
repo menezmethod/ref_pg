@@ -21,7 +21,7 @@ client ── /api/* ─────────────────┐  (ba
 - **Analytics are SQL views served for free.** `api.link_stats` and `api.top_referrers` are plain views with `security_invoker`. PostgREST serves them with filtering, ordering and paging, and RLS scopes them per tenant. There is no endpoint code.
 - **Rules are constraints.** URLs must be `http(s)://`, and codes are 3–32 letters or digits. These are `CHECK` constraints, so no code path can skip them. Errors map to HTTP codes: `400` for an invalid value, `409` for a taken alias, `401` for a missing key, `403` for a non-admin key.
 - **Privacy by default.** API keys are stored as SHA-256 hashes. Click IPs are cut to /24 (IPv4) or /48 (IPv6) before they are stored.
-- **Tested in two layers.** 25 pgTAP tests check RLS, grants and every rule, with the code under test running as the real `anon` role. A 26-check HTTP smoke test runs against the full stack. CI runs both on every push.
+- **Tested in two layers.** 25 pgTAP tests check RLS, grants and every rule, with the code under test running as the real `anon` role. A 28-check HTTP smoke test runs against the full stack. CI runs both on every push.
 
 ## Run it
 
@@ -81,7 +81,7 @@ tests/smoke.sh
 | Clicks batched, cache off (`LINK_CACHE_SECONDS=0`) | 5,006 | 10.9 ms | 89 ms |
 | Clicks batched, cache on (default) | **80,949** | **0.64 ms** | 186 ms |
 
-The cache-on run served 1.6 million redirects in 20 seconds and dropped no clicks. Machine: Apple M4 Max (16 cores), Docker in OrbStack 2.2.4. `wrk` and all three containers share that machine, so treat the numbers as relative. Across repeated runs, cache-off throughput varied between about 5,000 and 6,000 req/s. The cache-on p99 is much higher than its p50. That tail hasn't been profiled yet: likely suspects are the click flush running on worker 0 and the machine being saturated.
+No clicks are lost under that load. In a separate 10-second cache-on run, `wrk` counted 825,764 completed redirects and Postgres recorded 825,824 clicks. The 60 extra are requests still in flight when `wrk` stopped (it had 64 connections open). `bench.sh` prints both numbers. Machine: Apple M4 Max (16 cores), Docker in OrbStack 2.2.4. `wrk` and all three containers share that machine, so treat the numbers as relative. Across repeated runs, cache-off throughput varied between about 5,000 and 6,000 req/s. The cache-on p99 is much higher than its p50. That tail hasn't been profiled yet: likely suspects are the click flush running on worker 0 and the machine being saturated.
 
 Run it yourself: `RATE_LIMIT_REQUESTS=0 docker compose up -d --wait && ./bench.sh`
 
@@ -116,6 +116,7 @@ bench.sh                   wrk benchmark
 ## Known limitations
 
 - **Clicks are buffered in memory.** A crash (not a normal stop) loses up to `CLICK_FLUSH_SECONDS` of clicks. If Postgres is down, clicks wait in a 64 MB queue and are dropped when it fills.
+- **Referrer and user agent are stored as printable ASCII only.** Other bytes are stripped before a click is queued, because one invalid UTF-8 byte would make Postgres reject a whole batch.
 - **Each OpenResty instance has its own cache.** That's fine for one instance. With several, a takedown takes up to `LINK_CACHE_SECONDS` to reach all of them.
 - **`db/` runs once.** It initializes an empty volume. For a database with data in it, apply schema changes with `psql` by hand. Add a migration tool when that becomes painful.
 

@@ -7,9 +7,17 @@ local _M = {}
 local queue = ngx.shared.click_queue
 local BATCH = 5000
 
+-- Keep printable ASCII only, capped at the column limit. Headers are client
+-- input: one invalid UTF-8 byte would make Postgres reject the whole batch.
+local function clean(s, max)
+    if not s then return nil end
+    return (s:gsub("[^\32-\126]", "")):sub(1, max)
+end
+
 function _M.push(code, referrer, user_agent, ip)
     local ok, err = queue:rpush("q", cjson.encode({
-        code = code, ts = ngx.now(), referrer = referrer, user_agent = user_agent, ip = ip,
+        code = code, ts = ngx.now(), ip = ip,
+        referrer = clean(referrer, 2048), user_agent = clean(user_agent, 512),
     }))
     if not ok then
         ngx.log(ngx.WARN, "click dropped: ", err)  -- queue full: Postgres is down or too slow
@@ -50,8 +58,14 @@ local function flush()
         local status, err = post("/rpc/internal_record_clicks",
             '{"p_clicks":[' .. table.concat(items, ",") .. ']}')
         if status ~= 200 then
-            ngx.log(ngx.ERR, "click flush failed (", status or err, "), re-queueing ", #items)
-            for _, item in ipairs(items) do queue:rpush("q", item) end
+            -- Retry only what can succeed later (Postgres or PostgREST down). A 4xx
+            -- means the batch itself is bad; retrying it would block the queue forever.
+            if status and status < 500 then
+                ngx.log(ngx.ERR, "click flush rejected (", status, "), dropping ", #items)
+            else
+                ngx.log(ngx.ERR, "click flush failed (", status or err, "), re-queueing ", #items)
+                for _, item in ipairs(items) do queue:rpush("q", item) end
+            end
             return
         end
         if #items < BATCH then return end
