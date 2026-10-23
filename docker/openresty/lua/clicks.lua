@@ -15,12 +15,14 @@ local function clean(s, max)
 end
 
 function _M.push(code, referrer, user_agent, ip)
-    local ok, err = queue:rpush("q", cjson.encode({
+    local ok = queue:rpush("q", cjson.encode({
         code = code, ts = ngx.now(), ip = ip,
         referrer = clean(referrer, 2048), user_agent = clean(user_agent, 512),
     }))
     if not ok then
-        ngx.log(ngx.WARN, "click dropped: ", err)  -- queue full: Postgres is down or too slow
+        -- Queue full (Postgres down or too slow). Count instead of logging each
+        -- one: at full traffic that would be tens of thousands of lines a second.
+        queue:incr("dropped", 1, 0)
     end
 end
 
@@ -45,6 +47,15 @@ local function post(path, body)
     return tonumber(line:match("^HTTP/%d%.%d (%d+)"))
 end
 
+-- One log line per flush interval for everything dropped since the last one.
+local function report_drops()
+    local n = queue:get("dropped") or 0
+    if n > 0 then
+        queue:incr("dropped", -n)
+        ngx.log(ngx.WARN, "dropped ", n, " clicks since the last flush: the click queue is full")
+    end
+end
+
 local function flush()
     while true do
         local items = {}
@@ -63,8 +74,13 @@ local function flush()
             if status and status < 500 then
                 ngx.log(ngx.ERR, "click flush rejected (", status, "), dropping ", #items)
             else
-                ngx.log(ngx.ERR, "click flush failed (", status or err, "), re-queueing ", #items)
-                for _, item in ipairs(items) do queue:rpush("q", item) end
+                local lost = 0
+                for _, item in ipairs(items) do
+                    if not queue:rpush("q", item) then lost = lost + 1 end
+                end
+                if lost > 0 then queue:incr("dropped", lost, 0) end
+                ngx.log(ngx.ERR, "click flush failed (", status or err, "), re-queued ",
+                        #items - lost, ", lost ", lost, " (queue full)")
             end
             return
         end
@@ -72,10 +88,26 @@ local function flush()
     end
 end
 
+-- ngx.timer.every starts a new run each interval even while the last one is
+-- stuck on a slow Postgres. Overlapping flushes would each hold up to BATCH
+-- clicks outside the queue, so the queue would never fill and its size limit
+-- would mean nothing. Only worker 0 flushes, so a local flag is enough.
+local flushing = false
+local function tick()
+    report_drops()
+    if flushing then return end
+    flushing = true
+    local ok, err = pcall(flush)
+    flushing = false
+    if not ok then ngx.log(ngx.ERR, "click flush error: ", err) end
+end
+
 function _M.start(interval)
+    -- Create the counter while there is room, so incr never needs to allocate.
+    queue:add("dropped", 0)
     if ngx.worker.id() ~= 0 then return end
     -- On shutdown the timer fires once more with premature = true; flush then too.
-    ngx.timer.every(interval, function() flush() end)
+    ngx.timer.every(interval, tick)
 end
 
 return _M

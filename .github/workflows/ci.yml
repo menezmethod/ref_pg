@@ -29,6 +29,9 @@ jobs:
       - name: HTTP smoke test
         run: tests/smoke.sh
 
+      - name: Failure modes (stampede, outage, full queue)
+        run: tests/resilience.sh
+
       - name: Logs on failure
         if: failure()
         run: docker compose logs --no-color
