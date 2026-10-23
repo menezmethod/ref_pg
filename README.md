@@ -47,21 +47,21 @@ sequenceDiagram
     participant P as Postgres
 
     C->>N: GET /r/docs
-    alt code is in the link cache (almost every request)
-        N-->>C: 302 Location: https://example.com/docs
-    else cache miss: first visit, or entry older than 60 s
-        N->>R: internal_lookup_link('docs')
-        R->>P: SELECT url FROM links WHERE code = 'docs'
-        P-->>R: https://example.com/docs
-        R-->>N: "https://example.com/docs"
-        Note over N: cached for 60 s (unknown codes for 10 s)
-        N-->>C: 302 Location: https://example.com/docs
+    alt cache hit (almost every request)
+        N-->>C: 302 → example.com/docs
+    else cache miss
+        N->>R: internal_lookup_link
+        R->>P: SELECT url
+        P-->>R: url
+        R-->>N: url
+        Note over N: cache 60 s
+        N-->>C: 302 → example.com/docs
     end
-    Note over N: click pushed onto the in-memory queue, response already sent
+    Note over N: queue click (after the reply)
 
-    loop every second, on one worker
-        N->>R: internal_record_clicks([up to 5,000 clicks])
-        R->>P: one INSERT … SELECT for the whole batch
+    loop every second
+        N->>R: internal_record_clicks
+        R->>P: one batch INSERT
     end
 ```
 
