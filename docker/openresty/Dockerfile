@@ -4,6 +4,7 @@ FROM openresty/openresty:1.27.1.2-alpine
 RUN apk add --no-cache gettext
 
 COPY nginx.conf /usr/local/openresty/nginx/conf/nginx.conf.template
+COPY lua /usr/local/openresty/nginx/lua
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 

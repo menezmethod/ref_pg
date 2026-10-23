@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:15
+    build: ./docker/postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -29,6 +29,7 @@ services:
       PGRST_DB_URI: postgres://authenticator:${AUTHENTICATOR_PASSWORD}@db:5432/${POSTGRES_DB:-url_shortener}
       PGRST_DB_SCHEMAS: api
       PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_PRE_REQUEST: public.authenticate
     # No published port: clients go through OpenResty, which applies rate limits.
 
   openresty:
@@ -39,7 +40,12 @@ services:
     environment:
       RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-60}
       RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-60}
+      LINK_CACHE_SECONDS: ${LINK_CACHE_SECONDS:-60}
+      LINK_NEGATIVE_CACHE_SECONDS: ${LINK_NEGATIVE_CACHE_SECONDS:-10}
+      CLICK_FLUSH_SECONDS: ${CLICK_FLUSH_SECONDS:-1}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       LOG_LEVEL: ${LOG_LEVEL:-notice}
+      ACCESS_LOG: ${ACCESS_LOG:-/dev/stdout}
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-*}
     ports:
       - "${PORT:-8001}:80"

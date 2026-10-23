@@ -1,17 +1,27 @@
 # ref_pg
 
-A URL shortener where PostgreSQL is the application. The logic is a few SQL functions. [PostgREST](https://postgrest.org) turns them into an HTTP API, and OpenResty (nginx + Lua) serves redirects and applies rate limits. There is no application server.
+A reference URL shortener that shows how far PostgreSQL plus a thin proxy can go. There is no application server. Postgres holds the data, the rules and the permissions. [PostgREST](https://postgrest.org) turns SQL functions and views into an HTTP API, and OpenResty (nginx + Lua) serves redirects from memory. Every claim below is backed by a test or a benchmark in this repo.
 
 ```
-client ──► OpenResty :8001 ──┬── POST /api/rpc/*  ──► PostgREST ──► api.* functions ──► Postgres
-                             ├── GET  /r/{code}   ──► Lua ──► api.resolve_link() ──► 302 + click row
-                             └── GET  /health
+                 ┌──────────────────────── OpenResty :8001 ────────────────────────┐
+client ── GET /r/{code} ──► shared-memory cache ──► 302        click queue (memory)  │
+                 │                 │ miss                            │ every 1s      │
+                 │                 ▼                                 ▼               │
+                 │      api.internal_lookup_link        api.internal_record_clicks   │
+client ── /api/* ─────────────────┐  (batch insert)                                  │
+                 └────────────────┼─────────────────────────────────────────────────┘
+                                  ▼
+                 PostgREST ──► authenticate() ──► api.* functions and views ──► Postgres + RLS
 ```
 
-- Tables (`api_keys`, `links`, `clicks`) live in `public` and are not exposed.
-- PostgREST exposes only the `api` schema. The `anon` role can execute four functions and nothing else.
-- Input rules are table constraints: URLs must be `http(s)://`, codes are 3–32 letters or digits.
-- API keys are stored as SHA-256 hashes. The plaintext is shown once, when the key is created.
+## What it shows off
+
+- **The database is off the redirect path.** OpenResty caches code→URL in a `lua_shared_dict` and queues clicks in memory. One timer writes them to Postgres as a single batch insert every second. A redirect is a memory lookup. See [Benchmark](#benchmark).
+- **Multi-tenancy is row-level security.** Each API key belongs to a tenant. A PostgREST pre-request hook (`authenticate()`) puts the tenant in the transaction, and one RLS policy per table scopes every read and write to it. Link creation runs as the caller (`SECURITY INVOKER`), so the policy applies there too.
+- **Analytics are SQL views served for free.** `api.link_stats` and `api.top_referrers` are plain views with `security_invoker`. PostgREST serves them with filtering, ordering and paging, and RLS scopes them per tenant. There is no endpoint code.
+- **Rules are constraints.** URLs must be `http(s)://`, and codes are 3–32 letters or digits. These are `CHECK` constraints, so no code path can skip them. Errors map to HTTP codes: `400` for an invalid value, `409` for a taken alias, `401` for a missing key, `403` for a non-admin key.
+- **Privacy by default.** API keys are stored as SHA-256 hashes. Click IPs are cut to /24 (IPv4) or /48 (IPv6) before they are stored.
+- **Tested in two layers.** 25 pgTAP tests check RLS, grants and every rule, with the code under test running as the real `anon` role. A 26-check HTTP smoke test runs against the full stack. CI runs both on every push.
 
 ## Run it
 
@@ -20,22 +30,24 @@ cp .env.example .env    # set POSTGRES_PASSWORD and AUTHENTICATOR_PASSWORD
 docker compose up -d --wait
 ```
 
-Create the first admin key (the only step that needs database access):
+Create a tenant and its first admin key (the only step that needs database access):
 
 ```bash
-docker compose exec db sh -c 'psql -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select issue_api_key('"'admin'"', true)"'
+docker compose exec db sh -c 'psql -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select issue_api_key('"'acme', 'admin', true"')"'
 ```
 
 ## API
 
-| Call | Auth | Result |
-|---|---|---|
-| `POST /api/rpc/create_short_link` `{"p_original_url", "p_custom_alias"?}` | key | `{"code", "original_url"}` |
-| `GET /r/{code}` | none | `302` to the URL and one row in `clicks`, or `404` |
-| `POST /api/rpc/create_api_key` `{"p_name", "p_is_admin"?}` | admin key | the new key (plaintext, shown once) |
-| `POST /api/rpc/revoke_api_key` `{"p_key"}` | admin key | `true` if a key was revoked |
+Send the key in the `X-API-Key` header.
 
-Send the key in the `X-API-Key` header. Errors: `401` bad or missing key, `400` invalid URL or alias, `409` alias taken.
+| Call | Key | Result |
+|---|---|---|
+| `POST /api/rpc/create_short_link` `{"p_original_url", "p_custom_alias"?}` | any | `{"code", "original_url"}` |
+| `GET /r/{code}` | none | `302` to the URL, or `404` |
+| `GET /api/link_stats` | any | per link: `clicks`, `clicks_24h`, `last_click_at` |
+| `GET /api/top_referrers` | any | clicks per `code` and `referrer` |
+| `POST /api/rpc/create_api_key` `{"p_name", "p_is_admin"?}` | admin | a new key for your tenant, shown once |
+| `POST /api/rpc/revoke_api_key` `{"p_key"}` | admin | `true` if a key in your tenant was revoked |
 
 ```bash
 curl -X POST localhost:8001/api/rpc/create_short_link \
@@ -43,18 +55,35 @@ curl -X POST localhost:8001/api/rpc/create_short_link \
   -d '{"p_original_url": "https://example.com/docs", "p_custom_alias": "docs"}'
 
 curl -i localhost:8001/r/docs
+
+curl -H "X-API-Key: $KEY" 'localhost:8001/api/link_stats?order=clicks.desc&limit=10'
 ```
 
-Take down an abusive link: `update links set is_active = false where code = '...';`
+Views accept [PostgREST query syntax](https://docs.postgrest.org/en/v12/references/api/tables_views.html): `?code=eq.docs`, `?select=code,clicks`, `?order=clicks_24h.desc`.
+
+Take down an abusive link: `update links set is_active = false where code = '...';`. Cached redirects keep working until the cache entry expires (`LINK_CACHE_SECONDS`, 60 by default).
 
 ## Test
 
 ```bash
-RATE_LIMIT_REQUESTS=6000 docker compose up -d --wait
-./test.sh
+RATE_LIMIT_REQUESTS=0 docker compose up -d --wait
+docker compose exec -T db sh -c 'psql -X -q -At -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < tests/db.sql
+tests/smoke.sh
 ```
 
-`test.sh` covers auth, input validation, redirects, click counting, and that internal or removed functions are not reachable.
+## Benchmark
+
+`GET /r/{code}` for one hot link, `wrk -t4 -c64 -d20s`, with rate limiting and nothing else changed between runs.
+
+| Setup | Requests/s | p50 | p99 |
+|---|---:|---:|---:|
+| Before: one synchronous `INSERT` per click | 714 | 79 ms | 319 ms |
+| Clicks batched, cache off (`LINK_CACHE_SECONDS=0`) | 5,006 | 10.9 ms | 89 ms |
+| Clicks batched, cache on (default) | **80,949** | **0.64 ms** | 186 ms |
+
+The cache-on run served 1.6 million redirects in 20 seconds and dropped no clicks. Machine: Apple M4 Max (16 cores), Docker in OrbStack 2.2.4. `wrk` and all three containers share that machine, so treat the numbers as relative. Across repeated runs, cache-off throughput varied between about 5,000 and 6,000 req/s. The cache-on p99 is much higher than its p50. That tail hasn't been profiled yet: likely suspects are the click flush running on worker 0 and the machine being saturated.
+
+Run it yourself: `RATE_LIMIT_REQUESTS=0 docker compose up -d --wait && ./bench.sh`
 
 ## Configuration
 
@@ -64,18 +93,31 @@ RATE_LIMIT_REQUESTS=6000 docker compose up -d --wait
 | `AUTHENTICATOR_PASSWORD` | required | PostgREST login. Letters and digits only (it goes into a URI) |
 | `POSTGRES_USER`, `POSTGRES_DB` | `postgres`, `url_shortener` | |
 | `PORT` | `8001` | Published OpenResty port |
-| `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW` | `60`, `60` | Requests per window (seconds) per IP |
-| `LOG_LEVEL` | `notice` | nginx error log level |
+| `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW` | `60`, `60` | Requests per window (seconds) per client IP. `0` turns limiting off |
+| `TRUSTED_PROXIES` | empty | CIDRs of reverse proxies in front of OpenResty. Their `X-Forwarded-For` becomes the client IP. **Set this behind Coolify or Traefik**, or every client shares one rate limit |
+| `LINK_CACHE_SECONDS` | `60` | How long a code→URL entry stays in memory. `0` turns the cache off |
+| `LINK_NEGATIVE_CACHE_SECONDS` | `10` | How long an unknown code is remembered |
+| `CLICK_FLUSH_SECONDS` | `1` | Click batch interval |
+| `LOG_LEVEL`, `ACCESS_LOG` | `notice`, `/dev/stdout` | nginx logging. `ACCESS_LOG=off` disables the access log |
 | `CORS_ALLOW_ORIGIN` | `*` | |
 
-## Schema changes
+## Layout
 
-`db/` runs once, on an empty volume. To start over: `docker compose down -v && docker compose up -d --wait`. For a database with data in it, apply changes with `psql` by hand. Add a migration tool when that becomes painful.
+```
+db/000_schema.sql          roles, tables, RLS, functions, views (runs once on an empty volume)
+db/001_authenticator.sh    sets the PostgREST login password
+docker/openresty/          nginx.conf (redirects, cache, rate limits) and lua/clicks.lua (click batching)
+docker/postgres/           postgres:15 plus pgTAP
+tests/db.sql               pgTAP tests
+tests/smoke.sh             HTTP smoke test
+bench.sh                   wrk benchmark
+```
 
 ## Known limitations
 
-- Rate limits key on the TCP peer address. Behind a reverse proxy (Coolify, Traefik), add `set_real_ip_from` and `real_ip_header` to `nginx.conf`, or all clients share one limit.
-- Short links are public by design. Anyone with a key can create links to any `http(s)` URL.
+- **Clicks are buffered in memory.** A crash (not a normal stop) loses up to `CLICK_FLUSH_SECONDS` of clicks. If Postgres is down, clicks wait in a 64 MB queue and are dropped when it fills.
+- **Each OpenResty instance has its own cache.** That's fine for one instance. With several, a takedown takes up to `LINK_CACHE_SECONDS` to reach all of them.
+- **`db/` runs once.** It initializes an empty volume. For a database with data in it, apply schema changes with `psql` by hand. Add a migration tool when that becomes painful.
 
 ## License
 

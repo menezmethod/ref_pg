@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write .env
+        run: |
+          {
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
+            echo "AUTHENTICATOR_PASSWORD=$(openssl rand -hex 16)"
+            echo "RATE_LIMIT_REQUESTS=0"
+          } > .env
+
+      - name: Start stack
+        run: docker compose up -d --build --wait
+
+      - name: pgTAP
+        run: docker compose exec -T db sh -c 'psql -X -q -At -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < tests/db.sql
+
+      - name: HTTP smoke test
+        run: tests/smoke.sh
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color
