@@ -2,16 +2,67 @@
 
 A reference URL shortener that shows how far PostgreSQL plus a thin proxy can go. There is no application server. Postgres holds the data, the rules and the permissions. [PostgREST](https://postgrest.org) turns SQL functions and views into an HTTP API, and OpenResty (nginx + Lua) serves redirects from memory. Every claim below is backed by a test or a benchmark in this repo.
 
+```mermaid
+flowchart TB
+    client(["Client"])
+
+    subgraph edge["OpenResty :8001"]
+        direction LR
+        rl["Rate limit<br/>per client IP"] --> cache[("Link cache<br/>hit → 302, no DB")]
+        cache -->|push click| queue[("Click queue")] --> timer["Flush timer<br/>every 1 s"]
+    end
+
+    rest["PostgREST · authenticate() maps X-API-Key → tenant"]
+
+    subgraph db["PostgreSQL"]
+        direction LR
+        public["create_short_link<br/>link_stats · top_referrers"] --> rls{{"Row-level security<br/>own tenant only"}} --> data[("tenants · api_keys<br/>links · clicks")]
+        internal["internal_lookup_link<br/>internal_record_clicks"] -->|all tenants| data
+    end
+
+    client -->|"GET /r/{code} · /api/* with X-API-Key"| edge
+    edge -->|"cache miss · one batch INSERT per second · /api/*"| rest
+    rest --> db
+
+    classDef hot fill:#e6f4ea,stroke:#1e8e3e,color:#0d3b1e
+    classDef store fill:#e8f0fe,stroke:#1a73e8,color:#0b2a5c
+    classDef guard fill:#fef7e0,stroke:#e37400,color:#4a2800
+    class rl,cache,queue,timer hot
+    class data store
+    classDef api fill:#f3e8fd,stroke:#8430ce,color:#3b1060
+    classDef internal fill:#f1f3f4,stroke:#5f6368,color:#202124
+    class rls,rest guard
+    class public api
+    class internal internal
 ```
-                 ┌──────────────────────── OpenResty :8001 ────────────────────────┐
-client ── GET /r/{code} ──► shared-memory cache ──► 302        click queue (memory)  │
-                 │                 │ miss                            │ every 1s      │
-                 │                 ▼                                 ▼               │
-                 │      api.internal_lookup_link        api.internal_record_clicks   │
-client ── /api/* ─────────────────┐  (batch insert)                                  │
-                 └────────────────┼─────────────────────────────────────────────────┘
-                                  ▼
-                 PostgREST ──► authenticate() ──► api.* functions and views ──► Postgres + RLS
+
+Redirects never wait for Postgres. A cache hit answers from memory, and the click is written later as part of a batch:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant N as OpenResty
+    participant R as PostgREST
+    participant P as Postgres
+
+    C->>N: GET /r/docs
+    alt code is in the link cache (almost every request)
+        N-->>C: 302 Location: https://example.com/docs
+    else cache miss: first visit, or entry older than 60 s
+        N->>R: internal_lookup_link('docs')
+        R->>P: SELECT url FROM links WHERE code = 'docs'
+        P-->>R: https://example.com/docs
+        R-->>N: "https://example.com/docs"
+        Note over N: cached for 60 s (unknown codes for 10 s)
+        N-->>C: 302 Location: https://example.com/docs
+    end
+    Note over N: click pushed onto the in-memory queue, response already sent
+
+    loop every second, on one worker
+        N->>R: internal_record_clicks([up to 5,000 clicks])
+        R->>P: one INSERT … SELECT for the whole batch
+    end
 ```
 
 ## What it shows off
